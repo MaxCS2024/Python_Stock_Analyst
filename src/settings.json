@@ -1,0 +1,18 @@
+{
+  "tickers": [
+    "SWED-A.ST",
+    "SAND.ST",
+    "VOLV-B.ST",
+    "INVE-B.ST",
+    "ATCO-A.ST",
+    "ERIC-B.ST",
+    "SEB-A.ST",
+    "HM-B.ST"
+  ],
+  "start_date": "2021-10-01",
+  "max_weight": 0.25,
+  "risk_free_rate": 0.02,
+  "target_return": 0.15,
+  "train_end": "2024-12-31",
+  "benchmark": "^OMX"
+}
