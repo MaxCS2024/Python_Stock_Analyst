@@ -10,6 +10,9 @@ settings with sliders and explains each result in plain language.
 
 import math
 import sys
+import json
+
+from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -21,6 +24,7 @@ from src import backtest
 from src import calculations
 from src import portfolio
 from src import settings
+from src import report
 
 # If started with plain "python dashboard.py" (or VS Code's Run button),
 # restart it properly with "streamlit run dashboard.py".
@@ -554,6 +558,7 @@ with tab3:
 # ---------------------------------------------------------------
 
 train_end_to_save = config["train_end"]
+bench = None
 
 with tab4:
     months = list(returns.index)
@@ -639,3 +644,22 @@ with st.sidebar:
         settings.save(current)
         st.session_state["just_saved"] = True
         st.rerun()   # reload so everything uses the newly saved settings
+        # PDF report with exactly the settings shown on screen
+        st.divider()
+        st.subheader("Share")
+        signature = json.dumps(current, sort_keys=True)
+        if st.button("Create PDF report"):
+            with st.spinner("Building the report..."):
+                pdf = report.build_report(prices, current, bench)
+            st.session_state["report"] = (signature, pdf)
+
+        stored = st.session_state.get("report")
+        if stored and stored[0] == signature:
+            st.download_button(
+                "Download PDF report",
+                data=stored[1],
+                file_name=f"portfolio_report_{date.today().isoformat()}.pdf",
+                mime="application/pdf",
+            )
+        elif stored:
+            st.caption("Settings changed since the last report. Create it again.")        

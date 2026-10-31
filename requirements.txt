@@ -1,15 +1,18 @@
 # Data download
 yfinance>=0.2.40
-
+ 
 # Calculations
 pandas>=2.0
 numpy>=1.24
 scipy>=1.10
-
+ 
 # Charts for main.py
 matplotlib>=3.7
 seaborn>=0.13
-
+ 
 # Dashboard
 streamlit>=1.46
 plotly>=5.18
+ 
+# PDF report
+reportlab>=4.0

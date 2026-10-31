@@ -1,3 +1,5 @@
+import warnings
+
 import yfinance as yf
 import pandas as pd
 
@@ -6,7 +8,10 @@ from src import portfolio
 from src import backtest
 from src import settings
 from src import visualizations
+from src import report
 
+# Hide harmless pandas deprecation warnings coming from inside yfinance
+warnings.filterwarnings("ignore", message=".*inplace keyword.*")
 
 # Settings come from settings.json (edit them with the dashboard's
 # "Save as default" button, or by editing the file directly)
@@ -153,8 +158,13 @@ test = backtest.run_backtest(
 backtest.print_backtest(test)
 
 
-# Step 6: Generate visualizations
+# Step 6: PDF report (saved in the reports/ folder)
+pdf = report.build_report(prices, config, benchmark_returns)
+report_path = report.save_report(pdf)
+print(f"\nPDF report saved: {report_path}")
 
+
+# Step 7: Generate visualizations
 visualizations.correlation_heatmap(
     analysis["correlation"]
 )
