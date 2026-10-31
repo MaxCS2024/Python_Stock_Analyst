@@ -8,11 +8,11 @@ It uses the same calculations as main.py, but lets you change the
 settings with sliders and explains each result in plain language.
 """
 
+import os
 import math
 import sys
 import json
-
-from datetime import date
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -644,22 +644,37 @@ with st.sidebar:
         settings.save(current)
         st.session_state["just_saved"] = True
         st.rerun()   # reload so everything uses the newly saved settings
-        # PDF report with exactly the settings shown on screen
-        st.divider()
-        st.subheader("Share")
-        signature = json.dumps(current, sort_keys=True)
-        if st.button("Create PDF report"):
-            with st.spinner("Building the report..."):
-                pdf = report.build_report(prices, current, bench)
-            st.session_state["report"] = (signature, pdf)
+        
+        
+# ---------------------------------------------------------------
+# PDF report (in the sidebar, under Save as default)
+# ---------------------------------------------------------------
 
-        stored = st.session_state.get("report")
-        if stored and stored[0] == signature:
-            st.download_button(
-                "Download PDF report",
-                data=stored[1],
-                file_name=f"portfolio_report_{date.today().isoformat()}.pdf",
-                mime="application/pdf",
-            )
-        elif stored:
-            st.caption("Settings changed since the last report. Create it again.")        
+signature = json.dumps(current, sort_keys=True)
+
+with st.sidebar:
+    st.divider()
+    st.subheader("Report")
+    if st.button(
+        "📄 Generate report", type="primary",
+        help="Creates a PDF report with the settings shown on screen and saves "
+             "it in the reports folder.",
+    ):
+        with st.spinner("Building the report..."):
+            pdf = report.build_report(prices, current, bench)
+            path = report.save_report(pdf)
+        st.session_state["report"] = {"signature": signature, "pdf": pdf, "path": path}
+
+    stored = st.session_state.get("report")
+    if stored and stored["signature"] == signature:
+        relative = os.path.relpath(stored["path"], settings.PROJECT_ROOT)
+        st.success(f"Saved to {relative}")
+        st.download_button(
+            "⬇ Download PDF",
+            data=stored["pdf"],
+            file_name=os.path.basename(stored["path"]),
+            mime="application/pdf",
+        )
+    elif stored:
+        st.caption("You changed the settings after the last report. "
+                   "Generate it again to update it.")
