@@ -29,6 +29,7 @@ DEFAULTS = {
     "target_return": 0.15,    # lowest-risk portfolio that reaches 15%
     "train_end": "2024-12-31",  # backtest: weights chosen with data up to here
     "benchmark": "^OMX",      # index to compare against (see BENCHMARKS)
+    "shrinkage": False,       # Ledoit-Wolf: steadier covariance estimates
 }
 
 

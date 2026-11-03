@@ -11,6 +11,7 @@ Page 2:  1. The stocks
 Page 3:  2. How they move together
 Page 4:  3. The best mix
 Page 5:  4. Did it hold up? (backtest)
+Page 6:  5. Year by year (rolling backtest)
 """
 
 import io
@@ -335,7 +336,8 @@ def build_report(prices, config, benchmark_returns=None, currency_info=None):
 
     # --- Calculations (same as main.py and the dashboard) ---
     prices = prices.rename(columns=settings.display_name)
-    analysis = calculations.calculate_all(prices)
+    shrink = config.get("shrinkage", False)
+    analysis = calculations.calculate_all(prices, shrink=shrink)
     returns = analysis["returns"]
     stats = analysis["statistics"]
     corr = analysis["correlation"]
@@ -369,10 +371,18 @@ def build_report(prices, config, benchmark_returns=None, currency_info=None):
     try:
         test = backtest.run_backtest(
             returns, train_end=config["train_end"], risk_free_rate=rf,
-            max_weight=max_weight, benchmark_returns=benchmark_returns)
+            max_weight=max_weight, benchmark_returns=benchmark_returns, shrink=shrink)
         test_note = None
     except ValueError as error:
         test, test_note = None, str(error)
+
+    try:
+        rolling = backtest.rolling_backtest(
+            returns, risk_free_rate=rf, max_weight=max_weight,
+            benchmark_returns=benchmark_returns, shrink=shrink)
+        rolling_note = None
+    except ValueError as error:
+        rolling, rolling_note = None, str(error)
 
     pairs = corr.where(np.triu(np.ones(corr.shape, dtype=bool), k=1)).stack()
     period = f"{returns.index[0]:%b %Y} to {returns.index[-1]:%b %Y}"
@@ -410,6 +420,8 @@ def build_report(prices, config, benchmark_returns=None, currency_info=None):
                 if config["benchmark"] in settings.BENCHMARKS else "")],
             ["Risk-free rate", _pct(rf, 2)],
             ["Target return", _pct(target_return)],
+            ["Covariance", (f"Ledoit-Wolf shrinkage (intensity {analysis['shrinkage']:.0%})"
+                            if shrink else "Normal sample estimate (no shrinkage)")],
         ]
         if test is not None:
             tr0, tr1 = test["train_period"]
@@ -446,6 +458,12 @@ def build_report(prices, config, benchmark_returns=None, currency_info=None):
                 f"came from {escape(winner)}. The optimizer predicted "
                 f"{_pct(res.loc['Max Sharpe', 'Predicted Return'])} a year and got "
                 f"{_pct(res.loc['Max Sharpe', 'Actual Return'])}.")
+        if rolling is not None:
+            n = rolling["n_years"]
+            findings.append(
+                f"Re-picking the weights every year, Max Sharpe beat equal weight in "
+                f"{rolling['wins']['Max Sharpe']} of {n} years and Min Variance in "
+                f"{rolling['wins']['Min Variance']} of {n}.")
 
         story.append(_p("Key findings", "h2"))
         for f in findings:
@@ -495,13 +513,17 @@ def build_report(prices, config, benchmark_returns=None, currency_info=None):
 
         ranked = stats.assign(Sharpe=(stats["Annual Return"] - rf) / stats["Annual Volatility"])
         ranked = ranked.sort_values("Sharpe", ascending=False)
-        rows = [["Stock", "Return per year", "Volatility per year", "Return per unit of risk",
+        rows = [["Stock", "Average", "Compounded", "Volatility", "Return / risk",
                  "Verdict"]]
         for name, r in ranked.iterrows():
-            rows.append([name, _pct(r["Annual Return"]), _pct(r["Annual Volatility"]),
-                         f"{r['Sharpe']:.2f}", _sharpe_verdict(r["Sharpe"])])
-        story.append(_table(rows, [42 * mm, 30 * mm, 34 * mm, 40 * mm,
-                                   CONTENT_WIDTH - 146 * mm], number_cols=(1, 2, 3)))
+            rows.append([name, _pct(r["Annual Return"]), _pct(r["Compounded Return"]),
+                         _pct(r["Annual Volatility"]), f"{r['Sharpe']:.2f}",
+                         _sharpe_verdict(r["Sharpe"])])
+        story.append(_table(rows, [40 * mm, 25 * mm, 28 * mm, 25 * mm, 28 * mm,
+                                   CONTENT_WIDTH - 146 * mm], number_cols=(1, 2, 3, 4)))
+        story.append(Spacer(1, 3))
+        story.append(_p("All values per year. Compounded is what the money actually grew "
+                        "by; the average is what the optimizer uses.", "small"))
 
         story.append(_p("What 100 kr became", "h2"))
         story.append(chart("growth", scales["stocks"],
@@ -510,11 +532,13 @@ def build_report(prices, config, benchmark_returns=None, currency_info=None):
         story.append(chart("risk", scales["stocks"],
                            lambda s: _risk_return_chart(stats, color_of, s)))
         story.append(_note_box("How to read this", [
-            "<b>Return per year</b>: average monthly return x 12, dividends included. "
-            "5-10% is normal for stocks over the long run.",
+            "<b>Average</b>: average monthly return x 12, dividends included. "
+            "5-10% is normal for stocks over the long run. <b>Compounded</b> is what the "
+            "money actually grew by. For volatile stocks it is clearly lower, because "
+            "losses hurt more than gains help: +50% then -50% leaves 75 kr of 100.",
             "<b>Volatility</b>: how much the price swings. 18-25% is normal for a large "
             "company; above 30% is wild.",
-            "<b>Return per unit of risk</b>: below 0.3 is poor, 0.3-0.7 OK, 0.7-1.0 good, "
+            "<b>Return / risk</b> (Sharpe ratio): below 0.3 is poor, 0.3-0.7 OK, 0.7-1.0 good, "
             "above 1.0 excellent.",
         ]))
         story.append(PageBreak())
@@ -649,6 +673,55 @@ def build_report(prices, config, benchmark_returns=None, currency_info=None):
                 escape(settings.benchmark_note(config["benchmark"])),
                 "A short test period is one data point, not proof.",
             ]))
+        story.append(PageBreak())
+
+        # =======================================================
+        # Page 6: Rolling backtest
+        # =======================================================
+        story.append(_SectionStart(marks, "rolling"))
+        story.append(_p("5. Year by year", "h1"))
+        if rolling is None:
+            story.append(_p(f"The yearly test could not run: {escape(rolling_note)}", "lead"))
+        else:
+            n = rolling["n_years"]
+            wins = rolling["wins"]
+            story.append(_p(
+                f"Re-picking the weights every year, Max Sharpe beat equal weight in "
+                f"{wins['Max Sharpe']} of {n} years, and Min Variance in "
+                f"{wins['Min Variance']} of {n}.", "lead"))
+            story.append(chart("rolling", scales["rolling"],
+                               lambda s: _backtest_chart(rolling["growth"], s)))
+
+            story.append(_p("Return each year", "h2"))
+            years = rolling["years"]
+            cols = [c for c in years.columns if c != "Best"]
+            rows = [["Year"] + cols + ["Best"]]
+            for year, row in years.iterrows():
+                rows.append([year] + [_pct(row[c]) for c in cols] + [row["Best"]])
+            other = (CONTENT_WIDTH - 32 * mm - 30 * mm) / len(cols)
+            story.append(_table(rows, [32 * mm] + [other] * len(cols) + [30 * mm],
+                                number_cols=tuple(range(1, len(cols) + 1))))
+
+            story.append(_p("All test years combined", "h2"))
+            summary = rolling["summary"]
+            rows = [["Portfolio", "Compounded per year", "Volatility", "Sharpe ratio",
+                     "Worst drop"]]
+            for name, row in summary.iterrows():
+                rows.append([name, _pct(row["Compounded Return"]),
+                             _pct(row["Actual Volatility"]), f"{row['Actual Sharpe']:.2f}",
+                             _pct(row["Max Drawdown"])])
+            story.append(_table(rows, [42 * mm, 36 * mm, 30 * mm, 30 * mm,
+                                       CONTENT_WIDTH - 138 * mm], number_cols=(1, 2, 3, 4)))
+
+            story.append(_note_box("How to read this", [
+                "Every January the weights are chosen again, using all data up to the end "
+                "of the previous year, then held for that year. This is how you would "
+                "actually run the strategy.",
+                "One result per year is much more convincing than a single test: a "
+                "strategy that wins most years is more likely to be real than lucky.",
+                "<b>Compounded per year</b> is what the money actually grew by over all "
+                "the test years together.",
+            ]))
 
         return story
 
@@ -667,19 +740,19 @@ def build_report(prices, config, benchmark_returns=None, currency_info=None):
 
     def too_long(marks, last_page):
         """Sections that spill onto more than one page."""
-        order = ["stocks", "corr", "mix", "backtest"]
+        order = ["stocks", "corr", "mix", "backtest", "rolling"]
         starts = [marks.get(name, 0) for name in order] + [last_page + 1]
         return [name for i, name in enumerate(order) if starts[i + 1] - starts[i] > 1]
 
     # Each section should fit on its own page. With many stocks the tables get
     # longer, so shrink the charts of a section that spills over, step by step.
-    scales = {"stocks": 1.0, "corr": 1.0, "mix": 1.0, "backtest": 1.0}
+    scales = {"stocks": 1.0, "corr": 1.0, "mix": 1.0, "backtest": 1.0, "rolling": 1.0}
     pdf, marks, last_page = render(scales)
     for _ in range(5):
-        shrink = [s for s in too_long(marks, last_page) if scales[s] > 0.55]
-        if not shrink:
+        overflowing = [s for s in too_long(marks, last_page) if scales[s] > 0.55]
+        if not overflowing:
             break
-        for section in shrink:
+        for section in overflowing:
             scales[section] = round(scales[section] - 0.1, 2)
         pdf, marks, last_page = render(scales)
     return pdf

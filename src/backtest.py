@@ -39,11 +39,11 @@ def split_returns(returns, train_end):
     return train, test
 
 
-def build_portfolios(train_returns, risk_free_rate, max_weight):
+def build_portfolios(train_returns, risk_free_rate, max_weight, shrink=False):
     """Pick the weights using only the training data."""
 
     statistics = calculations.calculate_statistics(train_returns)
-    _, annual_cov = calculations.calculate_covariance(train_returns)
+    _, annual_cov = calculations.calculate_covariance(train_returns, shrink)
     mean_returns = statistics["Annual Return"]
 
     return {
@@ -83,6 +83,7 @@ def performance(monthly_returns, risk_free_rate):
 
     return {
         "Actual Return": annual_return,
+        "Compounded Return": calculations.compounded_return(monthly_returns),
         "Actual Volatility": annual_vol,
         "Actual Sharpe": (annual_return - risk_free_rate) / annual_vol,
         "Total Return": growth.iloc[-1] - 1,
@@ -91,16 +92,17 @@ def performance(monthly_returns, risk_free_rate):
 
 
 def run_backtest(returns, train_end, risk_free_rate=0.02, max_weight=1.0,
-                 benchmark_returns=None):
+                 benchmark_returns=None, shrink=False):
     """
     Run the full backtest.
 
     returns:           monthly stock returns (from calculations.calculate_returns)
     train_end:         last date of the training period, e.g. "2024-12-31"
     benchmark_returns: optional monthly returns of an index, e.g. OMXS30
+    shrink:            use Ledoit-Wolf shrinkage when picking the weights
     """
     train, test = split_returns(returns, train_end)
-    portfolios = build_portfolios(train, risk_free_rate, max_weight)
+    portfolios = build_portfolios(train, risk_free_rate, max_weight, shrink)
 
     rows = {}
     monthly = {}
@@ -191,3 +193,116 @@ def print_backtest(backtest):
     print("\nTEST PERIOD RESULTS")
     print(table[["Total Return", "Max Drawdown",
                  "Predicted Sharpe", "Actual Sharpe"]].to_string())
+
+
+# ---------------------------------------------------------------
+# Rolling backtest: re-pick the weights every year
+# ---------------------------------------------------------------
+
+def rolling_backtest(returns, risk_free_rate=0.02, max_weight=1.0,
+                     benchmark_returns=None, shrink=False, min_train_months=24):
+    """
+    A fairer test than a single split: every calendar year, pick new weights
+    using all data up to the end of the previous year, then hold them for
+    that year. This is how you would actually run the strategy, and it gives
+    one result per year instead of a single number.
+
+    Returns a dict with:
+        years:   one row per year with each portfolio's return that year
+        summary: performance over all the test years combined
+        growth:  value of 100 kr over all the test years
+        wins:    how many years Max Sharpe and Min Variance beat equal weight
+    """
+    years = sorted(set(returns.index.year))
+    test_years = [
+        y for y in years
+        if (returns.index <= pd.Timestamp(f"{y - 1}-12-31")).sum() >= min_train_months
+    ]
+    if len(test_years) < 2:
+        raise ValueError(
+            f"The rolling test needs at least {min_train_months} months of training "
+            "data plus two calendar years to test. Pick an earlier start date."
+        )
+
+    names = ["Max Sharpe", "Min Variance", "Equal Weight"]
+    monthly = {name: [] for name in names}
+    year_rows = []
+
+    for year in test_years:
+        train = returns[returns.index <= pd.Timestamp(f"{year - 1}-12-31")]
+        test = returns[returns.index.year == year]
+        portfolios = build_portfolios(train, risk_free_rate, max_weight, shrink)
+
+        row = {"Year": str(year) if len(test) == 12 else f"{year} ({len(test)} mo)"}
+        for name in names:
+            r = portfolio_monthly_returns(test, portfolios[name]["weights"])
+            monthly[name].append(r)
+            row[name] = (1 + r).prod() - 1
+        year_rows.append(row)
+
+    monthly = {name: pd.concat(parts) for name, parts in monthly.items()}
+
+    bench_name = None
+    if benchmark_returns is not None:
+        index = monthly["Max Sharpe"].index
+        bench = benchmark_returns.reindex(index).dropna()
+        if len(bench) == len(index):
+            bench_name = benchmark_returns.name or "Benchmark"
+            monthly[bench_name] = bench
+            for row in year_rows:
+                year = int(row["Year"][:4])
+                b = bench[bench.index.year == year]
+                row[bench_name] = (1 + b).prod() - 1
+
+    year_table = pd.DataFrame(year_rows).set_index("Year")
+    year_table["Best"] = year_table[names].idxmax(axis=1)
+
+    summary = pd.DataFrame(
+        {name: performance(r, risk_free_rate) for name, r in monthly.items()}
+    ).T
+
+    growth = (1 + pd.DataFrame(monthly)).cumprod() * 100
+    start = returns.index[returns.index < growth.index[0]][-1]
+    growth = pd.concat([pd.DataFrame([[100.0] * growth.shape[1]],
+                                     columns=growth.columns, index=[start]), growth])
+
+    wins = {
+        name: int((year_table[name] > year_table["Equal Weight"]).sum())
+        for name in ["Max Sharpe", "Min Variance"]
+    }
+
+    return {
+        "years": year_table,
+        "summary": summary,
+        "growth": growth,
+        "wins": wins,
+        "n_years": len(year_table),
+        "benchmark": bench_name,
+    }
+
+
+def print_rolling(rolling):
+    """Print the rolling backtest."""
+
+    print("\n" + "=" * 60)
+    print("ROLLING BACKTEST (new weights every year)")
+    print("=" * 60)
+
+    table = rolling["years"].copy()
+    for col in table.columns:
+        if col != "Best":
+            table[col] = table[col].map(lambda x: f"{x:.1%}")
+    print(table.to_string())
+
+    n = rolling["n_years"]
+    for name, w in rolling["wins"].items():
+        print(f"{name} beat equal weight in {w} of {n} years")
+
+    summary = rolling["summary"]
+    print("\nALL TEST YEARS COMBINED")
+    print(pd.DataFrame({
+        "Compounded per year": summary["Compounded Return"].map(lambda x: f"{x:.1%}"),
+        "Volatility": summary["Actual Volatility"].map(lambda x: f"{x:.1%}"),
+        "Sharpe": summary["Actual Sharpe"].map(lambda x: f"{x:.2f}"),
+        "Worst drop": summary["Max Drawdown"].map(lambda x: f"{x:.1%}"),
+    }).to_string())

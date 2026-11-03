@@ -1,5 +1,7 @@
 # Python Stock Analyst
 
+![Tests](https://github.com/MaxCS2024/Python_Stock_Analyst/actions/workflows/tests.yml/badge.svg)
+
 A Markowitz portfolio optimizer for Swedish stocks. It downloads price history from Yahoo Finance, measures risk and return, finds the best mix of stocks, and then tests honestly whether that mix would have worked.
 
 There are two ways to use it:
@@ -12,7 +14,7 @@ Both read the same settings, so they always show the same results.
 ## What it does
 
 1. **Downloads monthly prices** for your chosen stocks, including dividends, and converts them all to Swedish kronor so foreign stocks include the currency effect.
-2. **Calculates the ingredients:** expected return, volatility, covariance and correlation for each stock.
+2. **Calculates the ingredients:** expected return (average and compounded), volatility, covariance and correlation for each stock. Optionally uses Ledoit-Wolf shrinkage for steadier covariance estimates.
 3. **Optimizes the portfolio** using Markowitz mean-variance optimization:
    - **Max Sharpe:** the best return per unit of risk
    - **Min Variance:** the lowest-risk mix possible
@@ -20,6 +22,7 @@ Both read the same settings, so they always show the same results.
    - **Equal Weight:** the same amount in every stock, as a simple benchmark
 4. **Draws the efficient frontier:** the best possible return at each level of risk.
 5. **Backtests out of sample:** picks the weights using only older data, then measures what happened afterwards and compares it with a benchmark index of your choice.
+6. **Tests year by year:** re-picks the weights every January using only earlier data, and counts how many years each optimized portfolio beat equal weight.
 
 Short selling isn't allowed, and you can cap how much any single stock can make up of the portfolio (25% by default).
 
@@ -31,10 +34,13 @@ Python_Stock_Analyst/
 ├── dashboard.py            # Interactive dashboard
 ├── requirements.txt        # Packages to install
 ├── settings.json           # Your saved stocks and settings (created on first save)
+├── .github/workflows/
+│   └── tests.yml           # Runs the tests on GitHub on every push
 ├── .streamlit/
 │   └── config.toml         # Dashboard colors, fonts and network setting
 ├── src/
-│   ├── settings.py         # Loads and saves settings.json
+│   ├── settings.py         # Loads and saves settings.json, benchmarks, stock names
+│   ├── data.py             # Downloads prices and benchmarks, converted to SEK
 │   ├── currency.py         # Converts all prices to SEK
 │   ├── calculations.py     # Returns, volatility, covariance, correlation
 │   ├── portfolio.py        # Markowitz optimization
@@ -42,7 +48,10 @@ Python_Stock_Analyst/
 │   └── visualizations.py   # Charts for main.py
 ├── tests/
 │   ├── test_portfolio.py   # Checks the math against a hand-calculated example
-│   └── test_currency.py    # Checks the currency conversion
+│   ├── test_currency.py    # Checks the currency conversion
+│   ├── test_calculations.py # Checks compounded returns, Ledoit-Wolf and the yearly test
+│   ├── test_app.py         # Runs the whole dashboard and builds a report with fake data
+│   └── fake_yfinance.py    # Made-up prices so the tests run without internet
 └── visualizations/         # Chart images saved by main.py
 ```
 
@@ -98,6 +107,7 @@ The dashboard has four tabs that follow the method step by step:
 | 2. How they move together | Correlation heatmap and the diversification effect |
 | 3. The best mix | The optimized portfolios, efficient frontier and weights |
 | 4. Did it hold up? | The backtest, with a slider to move the training/test split |
+| 5. Year by year | New weights every year: how many years each portfolio won |
 
 ### Terminal
 
@@ -110,8 +120,10 @@ Prints all the statistics, portfolios and backtest results, saves the charts to 
 ### Tests
 
 ```bash
-python tests/test_portfolio.py
+python -m pytest tests -v
 ```
+
+This runs all the tests, including one that runs the whole dashboard with made-up data, so no internet is needed. The same tests run automatically on GitHub every time you push; the badge at the top shows whether they passed.
 
 The main test checks the optimizer against a two-stock example worked out by hand: returns of 10% and 15%, volatilities of 20% and 30%, and a correlation of 0.3. A 12% target should give 60% / 40% weights and 19.35% volatility.
 
@@ -128,7 +140,8 @@ Settings are stored in `settings.json`. The easiest way to change them is the da
   "risk_free_rate": 0.02,
   "target_return": 0.15,
   "train_end": "2024-12-31",
-  "benchmark": "^OMX"
+  "benchmark": "^OMX",
+  "shrinkage": false
 }
 ```
 
@@ -141,6 +154,7 @@ Settings are stored in `settings.json`. The easiest way to change them is the da
 | `target_return` | Return for the "lowest risk for this return" portfolio |
 | `train_end` | Backtest: weights are chosen using data up to this date |
 | `benchmark` | Index to compare against: `^OMX` (OMXS30), `URTH` (MSCI World), `ACWI` (MSCI All Country World) or `SPY` (S&P 500) |
+| `shrinkage` | `true` uses Ledoit-Wolf shrinkage for steadier covariance estimates |
 
 If `settings.json` doesn't exist, the defaults in `src/settings.py` are used.
 
@@ -157,7 +171,8 @@ If `settings.json` doesn't exist, the defaults in `src/settings.py` are used.
 - **Past returns are a poor forecast.** The optimizer trusts historical average returns completely, so the backtest's predicted vs actual comparison is the most important result.
 - **Min Variance is often the most reliable portfolio**, because it only uses volatility and correlation, which are estimated more accurately than returns.
 - **Pick a benchmark that matches your stocks:** OMXS30 for Swedish stocks, a world index for a global mix. OMXS30 excludes dividends, so add roughly 3–4% a year to it for a fair comparison; the world indexes include them.
-- **A short backtest is one data point, not proof.** Try different `train_end` dates to see whether the conclusion holds.
+- **A short backtest is one data point, not proof.** The year-by-year test is more convincing: a strategy that wins most years is more likely to be real than lucky.
+- **Compounded returns are what you actually earn.** The optimizer uses average returns, which overstate growth for volatile stocks.
 - **Choosing stocks you already know did well** gives a hindsight advantage the index doesn't have.
 
 ## Disclaimer

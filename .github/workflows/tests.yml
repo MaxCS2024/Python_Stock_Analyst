@@ -1,0 +1,29 @@
+# Runs all tests on GitHub every time you push.
+# The result shows as a green check or red cross next to each commit,
+# and in the badge at the top of the README.
+
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install packages
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m pytest tests -v

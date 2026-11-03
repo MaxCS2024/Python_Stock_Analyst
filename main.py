@@ -1,13 +1,10 @@
 import warnings
 
-import yfinance as yf
-import pandas as pd
-
 # Hide harmless pandas deprecation warnings coming from inside yfinance
 warnings.filterwarnings("ignore", message=".*inplace keyword.*")
 
 from src import calculations
-from src import currency
+from src import data
 from src import portfolio
 from src import backtest
 from src import report
@@ -30,6 +27,7 @@ MAX_WEIGHT = config["max_weight"]
 
 TRAIN_END = config["train_end"]
 BENCHMARK = config["benchmark"]
+SHRINKAGE = config["shrinkage"]
 
 settings.lookup_names(tickers)   # readable names from Yahoo (cached after the first run)
 
@@ -37,30 +35,14 @@ print(f"Using {len(tickers)} stocks: "
       + ", ".join(settings.display_name(t) for t in tickers))
 
 
-# Step 1: Download stock data
+# Step 1: Download stock data and convert it to Swedish kronor
 
-data = yf.download(
-    tickers,
-    start=START_DATE,
-    end=END_DATE,
-    interval="1mo",
-    auto_adjust=True,
-    progress=False,
-    threads=False
-)
+loaded = data.load_prices(tickers, START_DATE, END_DATE)
+prices = loaded["prices"]
+currency_info = loaded["currency_info"]
 
-if data.empty:
-    raise ValueError("Yahoo Finance returned no data.")
-
-prices = data["Close"].dropna(axis=1, how="all").sort_index()
-
-if prices.empty:
-    raise ValueError("No valid stock prices were downloaded.")
-
-
-# Step 1b: Convert all prices to Swedish kronor
-
-prices, currency_info = currency.convert_to_sek(prices, START_DATE, END_DATE)
+if loaded["missing"]:
+    print(f"\nNo data for {', '.join(loaded['missing'])}. They were left out.")
 
 print("\nCURRENCIES (all prices converted to SEK)")
 for ticker, row in currency_info.iterrows():
@@ -68,12 +50,16 @@ for ticker, row in currency_info.iterrows():
     print(f"  {settings.display_name(ticker):<14} {row['Currency']}{status}")
 
 if prices.shape[1] < 2:
-    raise ValueError("Fewer than two stocks could be converted to SEK.")
+    raise ValueError("Fewer than two stocks have usable prices. Check the tickers.")
 
 
 # Step 2: Run financial calculations
 
-analysis = calculations.calculate_all(prices)
+analysis = calculations.calculate_all(prices, shrink=SHRINKAGE)
+
+if SHRINKAGE:
+    print(f"\nLedoit-Wolf shrinkage is on (intensity {analysis['shrinkage']:.0%}): "
+          "covariance blended toward a simpler estimate for steadier weights.")
 
 
 # Step 3: Print results
@@ -142,42 +128,32 @@ frontier = portfolio.efficient_frontier(
 
 # Step 5: Out-of-sample backtest
 
-benchmark_returns = None
-
-try:
-    bench_data = yf.download(
-        BENCHMARK,
-        start=START_DATE,
-        end=END_DATE,
-        interval="1mo",
-        auto_adjust=True,
-        progress=False,
-        threads=False
-    )
-    bench_close = bench_data["Close"]
-    if isinstance(bench_close, pd.DataFrame):
-        bench_close = bench_close.iloc[:, 0]
-    bench_close = bench_close.dropna().sort_index()
-
-    if not bench_close.empty:
-        bench_sek, _ = currency.convert_to_sek(
-            bench_close.to_frame(BENCHMARK), START_DATE, END_DATE
-        )
-        if not bench_sek.empty:
-            benchmark_returns = bench_sek.iloc[:, 0].pct_change().dropna()
-            benchmark_returns.name = settings.benchmark_name(BENCHMARK)
-except Exception as error:
-    print(f"\nCould not download benchmark {BENCHMARK}: {error}")
+benchmark_returns = data.load_benchmark(BENCHMARK, START_DATE, END_DATE)
+if benchmark_returns is None:
+    print(f"\nCould not download the benchmark {BENCHMARK}; the backtest runs without it.")
 
 test = backtest.run_backtest(
     analysis["returns"],
     train_end=TRAIN_END,
     risk_free_rate=RISK_FREE_RATE,
     max_weight=MAX_WEIGHT,
-    benchmark_returns=benchmark_returns
+    benchmark_returns=benchmark_returns,
+    shrink=SHRINKAGE
 )
 
 backtest.print_backtest(test)
+
+try:
+    rolling = backtest.rolling_backtest(
+        analysis["returns"],
+        risk_free_rate=RISK_FREE_RATE,
+        max_weight=MAX_WEIGHT,
+        benchmark_returns=benchmark_returns,
+        shrink=SHRINKAGE
+    )
+    backtest.print_rolling(rolling)
+except ValueError as error:
+    print(f"\nSkipping rolling backtest: {error}")
 
 
 # Step 6: PDF report (saved in the reports/ folder)

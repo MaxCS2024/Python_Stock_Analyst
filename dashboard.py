@@ -18,11 +18,11 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-import yfinance as yf
 
 from src import backtest
 from src import calculations
 from src import currency
+from src import data
 from src import portfolio
 from src import report
 from src import settings
@@ -143,51 +143,19 @@ def pct(x, decimals=1):
 display_name = settings.display_name
 
 
-@st.cache_data(ttl=3600, show_spinner="Downloading prices from Yahoo Finance...")
-def download_prices(tickers, start, end):
-    data = yf.download(
-        list(tickers), start=start, end=end, interval="1mo",
-        auto_adjust=True, progress=False, threads=False,
-    )
-    if data.empty:
-        return pd.DataFrame()
-    close = data["Close"]
-    if isinstance(close, pd.Series):
-        close = close.to_frame(tickers[0])
-    return close.dropna(axis=1, how="all").sort_index()
+@st.cache_data(ttl=3600, show_spinner="Downloading prices and converting to SEK...")
+def load_prices(tickers, start, end):
+    return data.load_prices(tickers, start, end)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def download_benchmark(benchmark, start, end):
-    try:
-        data = yf.download(
-            benchmark, start=start, end=end, interval="1mo",
-            auto_adjust=True, progress=False, threads=False,
-        )
-        close = data["Close"]
-        if isinstance(close, pd.DataFrame):
-            close = close.iloc[:, 0]
-        close = close.dropna().sort_index()
-        if close.empty:
-            return None
-        close_sek, _ = currency.convert_to_sek(close.to_frame(benchmark), start, end)
-        if close_sek.empty:
-            return None
-        returns = close_sek.iloc[:, 0].pct_change().dropna()
-        returns.name = settings.benchmark_name(benchmark)
-        return returns
-    except Exception:
-        return None
+def load_benchmark(benchmark, start, end):
+    return data.load_benchmark(benchmark, start, end)
 
 
 @st.cache_data(show_spinner="Looking up company names...")
 def load_names(tickers):
     return settings.lookup_names(tickers)
-
-
-@st.cache_data(ttl=3600, show_spinner="Converting prices to Swedish kronor...")
-def convert_prices(prices, start, end):
-    return currency.convert_to_sek(prices, start, end)
 
 
 # ---------------------------------------------------------------
@@ -255,6 +223,15 @@ with st.sidebar:
     if benchmark in settings.BENCHMARKS:
         st.caption(settings.BENCHMARKS[benchmark]["description"].capitalize() + ".")
 
+    st.subheader("Estimates")
+    shrink = st.toggle(
+        "Steadier estimates (Ledoit-Wolf)",
+        value=bool(config["shrinkage"]),
+        help="Blends the covariance estimate toward a simpler one, so the optimizer "
+             "reacts less to noise in the data. Usually gives more spread-out, more "
+             "stable weights. Compare the backtests with it on and off.",
+    )
+
 
 # ---------------------------------------------------------------
 # Load and calculate
@@ -266,32 +243,30 @@ if len(tickers) < 2:
     st.info("Pick at least two stocks in the sidebar to build a portfolio.")
     st.stop()
 
-prices = download_prices(tickers, str(start_date), str(end_date.date()))
+loaded = load_prices(tickers, str(start_date), str(end_date.date()))
+prices = loaded["prices"]
+prices_local = loaded["local_prices"]
+currency_info = loaded["currency_info"]
+missing = loaded["missing"]
 
-if prices.empty:
+if loaded["local_prices"].empty:
     st.error(
         "Yahoo Finance returned no prices. Check your internet connection "
         "and that the tickers exist on finance.yahoo.com."
     )
     st.stop()
 
-missing = [t for t in tickers if t not in prices.columns]
 if missing:
     st.warning(f"No data for {', '.join(missing)}. They were left out.")
 
-# Convert every price to Swedish kronor (prices_local keeps the originals)
-prices_local = prices
-prices, currency_info = convert_prices(prices_local, str(start_date), str(end_date.date()))
-
-not_converted = list(currency_info.index[~currency_info["Converted"]])
-if not_converted:
+if loaded["not_converted"]:
     st.warning(
-        f"Couldn't download exchange rates for {', '.join(not_converted)}, "
+        f"Couldn't download exchange rates for {', '.join(loaded['not_converted'])}, "
         "so they were left out."
     )
 
 prices = prices.rename(columns=display_name)
-prices_local = prices_local.drop(columns=not_converted).rename(columns=display_name)
+prices_local = prices_local.rename(columns=display_name)
 currency_of = {display_name(t): cur for t, cur in currency_info["Currency"].items()}
 
 if prices.shape[1] < 2:
@@ -302,7 +277,7 @@ if max_weight * prices.shape[1] < 1:
     max_weight = math.ceil(100 / prices.shape[1]) / 100
 
 try:
-    analysis = calculations.calculate_all(prices)
+    analysis = calculations.calculate_all(prices, shrink=shrink)
 except ValueError as error:
     st.error(str(error))
     st.stop()
@@ -343,11 +318,12 @@ st.caption(
        if foreign else "All values in SEK.")
 )
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "1. The stocks",
     "2. How they move together",
     "3. The best mix",
     "4. Did it hold up?",
+    "5. Year by year",
 ])
 
 
@@ -406,6 +382,7 @@ with tab1:
     table = pd.DataFrame({
         "Currency": pd.Series(currency_of).reindex(names),
         "Return per year": stats["Annual Return"] * 100,
+        "Compounded per year": stats["Compounded Return"] * 100,
         "Currency effect": (stats["Annual Return"] - local_returns) * 100,
         "Volatility per year": stats["Annual Volatility"] * 100,
         "Return per unit of risk": (stats["Annual Return"] - risk_free) / stats["Annual Volatility"],
@@ -415,7 +392,11 @@ with tab1:
         table,
         column_config={
             "Return per year": st.column_config.NumberColumn(
-                format="%.1f%%", help="In SEK, which is what a Swedish investor got."),
+                format="%.1f%%",
+                help="Average monthly return × 12, in SEK. This is what the optimizer uses."),
+            "Compounded per year": st.column_config.NumberColumn(
+                format="%.1f%%",
+                help="What the money actually grew by each year, in SEK."),
             "Currency effect": st.column_config.NumberColumn(
                 format="%.1f%%",
                 help="Return in SEK minus return in the stock's own currency. "
@@ -428,7 +409,11 @@ with tab1:
 
     with st.expander("How to read this"):
         st.markdown(
-            "- **Return per year** is the average monthly return × 12, in Swedish kronor.\n"
+            "- **Return per year** is the average monthly return × 12, in Swedish kronor. "
+            "The optimizer uses this.\n"
+            "- **Compounded per year** is what your money actually grew by. For volatile "
+            "stocks it's clearly lower than the average, because losses hurt more than "
+            "gains help: +50% then −50% leaves 75 kr of 100.\n"
             "- **Currency effect** shows how much exchange rates changed the return. "
             "A foreign stock can rise in its own currency and still lose money in SEK "
             "if that currency falls against the krona.\n"
@@ -524,6 +509,11 @@ with tab3:
         f"{join_names(top.index)} make up {pct(top.sum(), 0)} of it. These numbers come from the same data the optimizer "
         f"learned from, so they are a best case. Tab 4 tests them honestly.",
     )
+    if shrink:
+        st.caption(
+            f"Using Ledoit-Wolf shrinkage: the covariance is blended "
+            f"{analysis['shrinkage']:.0%} toward a simpler estimate for steadier weights."
+        )
 
     cols = st.columns(3)
     for col, (name, p) in zip(cols, portfolios.items()):
@@ -620,7 +610,7 @@ with tab3:
 # ---------------------------------------------------------------
 
 train_end_to_save = config["train_end"]
-bench = None
+bench = load_benchmark(benchmark, str(start_date), str(end_date.date()))
 
 with tab4:
     months = list(returns.index)
@@ -644,10 +634,9 @@ with tab4:
         )
 
         train_end_to_save = (train_end + pd.offsets.MonthEnd(0)).strftime("%Y-%m-%d")
-        bench = download_benchmark(benchmark, str(start_date), str(end_date.date()))
         test = backtest.run_backtest(
             returns, train_end=train_end, risk_free_rate=risk_free,
-            max_weight=max_weight, benchmark_returns=bench,
+            max_weight=max_weight, benchmark_returns=bench, shrink=shrink,
         )
         res = test["results"]
         growth = test["growth"]
@@ -746,7 +735,104 @@ with tab4:
                 f"- **{settings.benchmark_name(benchmark)}**: "
                 f"{settings.benchmark_note(benchmark)}\n"
                 "- A short test period is one data point, not proof. Move the slider above "
-                "to see whether the result holds for other split dates."
+                "to see whether the result holds for other split dates, or look at tab 5."
+            )
+
+
+# ---------------------------------------------------------------
+# Tab 5: rolling backtest (new weights every year)
+# ---------------------------------------------------------------
+
+with tab5:
+    try:
+        rolling = backtest.rolling_backtest(
+            returns, risk_free_rate=risk_free, max_weight=max_weight,
+            benchmark_returns=bench, shrink=shrink,
+        )
+    except ValueError as error:
+        rolling = None
+        st.info(str(error))
+
+    if rolling is not None:
+        n_years = rolling["n_years"]
+        wins = rolling["wins"]
+        summary = rolling["summary"]
+        r_growth = rolling["growth"]
+
+        headline(
+            f"Re-picking the weights every year, Max Sharpe beat equal weight in "
+            f"{wins['Max Sharpe']} of {n_years} years, and Min Variance in "
+            f"{wins['Min Variance']} of {n_years}.",
+            f"Over all the test years combined, Max Sharpe grew "
+            f"{pct(summary.loc['Max Sharpe', 'Compounded Return'])} a year, Min Variance "
+            f"{pct(summary.loc['Min Variance', 'Compounded Return'])} and equal weight "
+            f"{pct(summary.loc['Equal Weight', 'Compounded Return'])}.",
+        )
+
+        final_r = r_growth.iloc[-1]
+        cols = st.columns(len(final_r))
+        for col, name in zip(cols, final_r.index):
+            with col:
+                with st.container(border=True):
+                    st.metric(name, f"{final_r[name]:.0f} kr",
+                              delta=f"{final_r[name] - 100:+.1f}%",
+                              help="Value of 100 kr after all the test years.")
+                    st.caption(f"Worst drop: {pct(summary.loc[name, 'Max Drawdown'])}")
+
+        left, right = st.columns([3, 2])
+        with left:
+            st.subheader(f"100 kr from {r_growth.index[0]:%b %Y}")
+            fig = go.Figure()
+            for name in r_growth.columns:
+                fig.add_trace(go.Scatter(
+                    x=r_growth.index, y=r_growth[name], name=name, mode="lines",
+                    line=dict(color=PORTFOLIO_COLORS.get(name, GRANITE), width=2.5,
+                              dash="solid" if name in portfolios else "dash"),
+                    hovertemplate="%{y:.0f} kr<extra>" + name + "</extra>",
+                ))
+            fig.add_hline(y=100, line_color=GRANITE, line_width=1, opacity=0.5)
+            fig.update_yaxes(title="Value (kr)")
+            st.plotly_chart(style_figure(fig), key="rolling_growth")
+
+        with right:
+            st.subheader("Return each year")
+            years = rolling["years"].copy()
+            pct_cols = [c for c in years.columns if c != "Best"]
+            years[pct_cols] = years[pct_cols] * 100
+            st.dataframe(
+                years,
+                column_config={c: st.column_config.NumberColumn(format="%.1f%%")
+                               for c in pct_cols},
+            )
+
+        st.subheader("All test years combined")
+        combined = pd.DataFrame({
+            "Compounded per year": summary["Compounded Return"] * 100,
+            "Volatility": summary["Actual Volatility"] * 100,
+            "Sharpe ratio": summary["Actual Sharpe"],
+            "Worst drop": summary["Max Drawdown"] * 100,
+        })
+        st.dataframe(
+            combined,
+            column_config={
+                "Compounded per year": st.column_config.NumberColumn(format="%.1f%%"),
+                "Volatility": st.column_config.NumberColumn(format="%.1f%%"),
+                "Sharpe ratio": st.column_config.NumberColumn(format="%.2f"),
+                "Worst drop": st.column_config.NumberColumn(format="%.1f%%"),
+            },
+        )
+
+        with st.expander("How to read this"):
+            st.markdown(
+                "- Every January, the weights are chosen again using all data up to the "
+                "end of the previous year, then held for that year. This is how you would "
+                "actually run the strategy.\n"
+                "- One result per year is more convincing than tab 4's single test: a "
+                "strategy that wins most years is more likely to be real than lucky.\n"
+                "- **Compounded per year** is what the money actually grew by over all "
+                "the test years together.\n"
+                "- Turn **Steadier estimates (Ledoit-Wolf)** on and off in the sidebar to "
+                "see whether it improves the results."
             )
 
 
@@ -762,6 +848,7 @@ current = {
     "target_return": round(target_return, 4),
     "train_end": train_end_to_save,
     "benchmark": benchmark,
+    "shrinkage": bool(shrink),
 }
 
 saved_now = {k: config[k] for k in current}
