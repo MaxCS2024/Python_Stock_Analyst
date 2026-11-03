@@ -56,7 +56,9 @@ class Ticker:
             cur = "EUR"
         else:
             cur = "USD"
-        return {"currency": cur}
+        # A made-up but stable market value between 10 and 1,000 billion
+        market_cap = 1e10 * (1 + _seed(self.ticker) % 100)
+        return {"currency": cur, "marketCap": market_cap}
 
     @property
     def info(self):

@@ -87,3 +87,36 @@ def load_benchmark(benchmark, start, end):
         return returns
     except Exception:
         return None
+
+
+def load_market_caps(tickers):
+    """
+    Each company's market value (share price x number of shares) in SEK.
+    Used by Black-Litterman. Values Yahoo doesn't have are left out.
+    """
+    caps, cap_currency = {}, {}
+    for t in tickers:
+        try:
+            value = yf.Ticker(t).fast_info["marketCap"]
+        except Exception:
+            value = None
+        if value and value > 0:
+            caps[t] = float(value)
+            cur = currency.lookup_currency(t)
+            cap_currency[t] = currency.MINOR_UNITS.get(cur, (cur, 1))[0].upper()
+
+    # Convert to SEK with the latest monthly exchange rates
+    today = pd.Timestamp.today()
+    fx = currency.download_fx(
+        set(cap_currency.values()),
+        (today - pd.DateOffset(months=3)).strftime("%Y-%m-%d"),
+        (today + pd.DateOffset(days=1)).strftime("%Y-%m-%d"),
+    )
+    in_sek = {}
+    for t, value in caps.items():
+        cur = cap_currency[t]
+        if cur == currency.BASE_CURRENCY:
+            in_sek[t] = value
+        elif cur in fx.columns and fx[cur].dropna().size:
+            in_sek[t] = value * float(fx[cur].dropna().iloc[-1])
+    return in_sek

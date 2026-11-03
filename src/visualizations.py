@@ -1,8 +1,14 @@
+"""
+Optional chart windows for main.py (run: python main.py --charts).
+
+The dashboard and the PDF report show the same charts, so main.py only
+draws these when you ask for them.
+"""
+
 import os
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import seaborn as sns
 
 PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))
@@ -13,27 +19,32 @@ VISUALIZATION_DIR = os.path.join(
     "visualizations"
 )
 
-os.makedirs(VISUALIZATION_DIR, exist_ok=True)
+
+def _path(filename):
+    """Where to save a chart. The folder is created the first time it's needed."""
+    os.makedirs(VISUALIZATION_DIR, exist_ok=True)
+    return os.path.join(VISUALIZATION_DIR, filename)
 
 
 def correlation_heatmap(correlation):
 
     plt.figure(figsize=(12, 8))
 
-    sns.heatmap(
-        correlation,
-        annot=True,
-        cmap="RdYlGn",
-        center=0,
-        fmt=".2f",
-        linewidths=0.5
-    )
+    # Green = stocks move apart (good for diversification), red = move together
+    plt.imshow(correlation.values, cmap="RdYlGn_r", vmin=-1, vmax=1)
+    plt.colorbar(fraction=0.04)
+    plt.xticks(range(len(correlation)), correlation.columns, rotation=45, ha="right")
+    plt.yticks(range(len(correlation)), correlation.index)
+    for i in range(len(correlation)):
+        for j in range(len(correlation)):
+            plt.text(j, i, f"{correlation.values[i, j]:.2f}", ha="center", va="center",
+                     fontsize=9)
 
     plt.title("Stock Correlation Matrix")
     plt.tight_layout()
 
     plt.savefig(
-        os.path.join(VISUALIZATION_DIR, "correlation_heatmap.png"),
+        _path("correlation_heatmap.png"),
         dpi=300,
         bbox_inches="tight"
     )
@@ -68,7 +79,7 @@ def risk_return_chart(results):
     plt.tight_layout()
 
     plt.savefig(
-        os.path.join(VISUALIZATION_DIR, "risk_return.png"),
+        _path("risk_return.png"),
         dpi=300,
         bbox_inches="tight"
     )
@@ -95,7 +106,7 @@ def stock_performance_chart(prices):
     plt.tight_layout()
 
     plt.savefig(
-        os.path.join(VISUALIZATION_DIR, "stock_performance.png"),
+        _path("stock_performance.png"),
         dpi=300,
         bbox_inches="tight"
     )
@@ -161,7 +172,7 @@ def efficient_frontier_chart(frontier, statistics, portfolios):
     plt.tight_layout()
 
     plt.savefig(
-        os.path.join(VISUALIZATION_DIR, "efficient_frontier.png"),
+        _path("efficient_frontier.png"),
         dpi=300,
         bbox_inches="tight"
     )
@@ -191,7 +202,7 @@ def backtest_growth_chart(growth):
     plt.tight_layout()
 
     plt.savefig(
-        os.path.join(VISUALIZATION_DIR, "backtest_growth.png"),
+        _path("backtest_growth.png"),
         dpi=300,
         bbox_inches="tight"
     )
@@ -224,7 +235,7 @@ def predicted_vs_actual_chart(results):
     plt.tight_layout()
 
     plt.savefig(
-        os.path.join(VISUALIZATION_DIR, "predicted_vs_actual.png"),
+        _path("predicted_vs_actual.png"),
         dpi=300,
         bbox_inches="tight"
     )

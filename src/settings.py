@@ -30,6 +30,10 @@ DEFAULTS = {
     "train_end": "2024-12-31",  # backtest: weights chosen with data up to here
     "benchmark": "^OMX",      # index to compare against (see BENCHMARKS)
     "shrinkage": False,       # Ledoit-Wolf: steadier covariance estimates
+    "trading_cost": 0.001,    # 0.1% of the value of every trade
+    "return_model": "historical",  # "historical" or "black_litterman"
+    "views": {},              # Black-Litterman: {ticker: expected return per year}
+    "view_confidence": 0.5,   # Black-Litterman: how much to trust your views (0-1)
 }
 
 

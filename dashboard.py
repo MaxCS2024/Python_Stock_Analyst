@@ -19,10 +19,13 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from src import analysis as full_analysis   # 'analysis' is used below for the basic results
 from src import backtest
+from src import black_litterman
 from src import calculations
 from src import currency
 from src import data
+from src import export
 from src import portfolio
 from src import report
 from src import settings
@@ -153,6 +156,11 @@ def load_benchmark(benchmark, start, end):
     return data.load_benchmark(benchmark, start, end)
 
 
+@st.cache_data(ttl=24 * 3600, show_spinner="Looking up company values...")
+def load_market_caps(tickers):
+    return data.load_market_caps(tickers)
+
+
 @st.cache_data(show_spinner="Looking up company names...")
 def load_names(tickers):
     return settings.lookup_names(tickers)
@@ -231,6 +239,26 @@ with st.sidebar:
              "reacts less to noise in the data. Usually gives more spread-out, more "
              "stable weights. Compare the backtests with it on and off.",
     )
+    model_names = {"historical": "Historical average", "black_litterman": "Black-Litterman"}
+    return_model = st.radio(
+        "Expected returns",
+        options=list(model_names),
+        index=1 if config["return_model"] == "black_litterman" else 0,
+        format_func=model_names.get,
+        help="Historical average: each stock's past average return, so the optimizer "
+             "favours recent winners. Black-Litterman: the returns the market as a whole "
+             "implies, adjusted by your own views. More balanced, less luck-driven.",
+    )
+    views_area = st.container()   # filled in below, once the data is loaded
+
+    st.subheader("Backtests")
+    trading_cost = st.slider(
+        "Trading cost per trade (%)", 0.0, 1.0,
+        min(1.0, max(0.0, round(config["trading_cost"] * 100, 2))), 0.05,
+        help="A share of the value of every trade, like a broker's fee. Paid on the "
+             "first purchase, the monthly rebalancing and the yearly re-picking. "
+             "Swedish online brokers typically charge around 0.1% or less.",
+    ) / 100
 
 
 # ---------------------------------------------------------------
@@ -265,6 +293,7 @@ if loaded["not_converted"]:
         "so they were left out."
     )
 
+price_tickers = list(prices.columns)
 prices = prices.rename(columns=display_name)
 prices_local = prices_local.rename(columns=display_name)
 currency_of = {display_name(t): cur for t, cur in currency_info["Currency"].items()}
@@ -286,9 +315,55 @@ returns = analysis["returns"]
 stats = analysis["statistics"]
 annual_cov = analysis["annual_covariance"]
 corr = analysis["correlation"]
-mean_returns = stats["Annual Return"]
 names = list(stats.index)
 color_of = {name: STOCK_COLORS[i % len(STOCK_COLORS)] for i, name in enumerate(names)}
+
+# Expected returns: historical average or Black-Litterman
+market_caps, market_w, implied, return_model_fn = None, None, None, None
+views_by_name, confidence = {}, float(config["view_confidence"])
+name_to_ticker = {display_name(t): t for t in price_tickers}
+
+if return_model == "black_litterman":
+    market_caps = load_market_caps(tuple(price_tickers))
+    caps_by_name = {display_name(t): v for t, v in market_caps.items()}
+    market_w = black_litterman.market_weights(caps_by_name, names)
+    implied = black_litterman.implied_returns(annual_cov, market_w, risk_free)
+    return_model_fn = black_litterman.make_return_model(caps_by_name, risk_free)
+
+    with views_area:
+        st.markdown("**Your views (optional)**")
+        st.caption("Type your own expected return per year for any stock. "
+                   "Leave it empty if you have no view.")
+        saved_views = {display_name(t): v * 100 for t, v in config["views"].items()}
+        view_table = pd.DataFrame({
+            "Stock": names,
+            "Market-implied": (implied * 100).to_numpy(),
+            "Your view": pd.Series([saved_views.get(n) for n in names], dtype=float).to_numpy(),
+        })
+        edited = st.data_editor(
+            view_table, hide_index=True, disabled=["Stock", "Market-implied"],
+            key="views_editor",
+            column_config={
+                "Market-implied": st.column_config.NumberColumn(format="%.1f%%"),
+                "Your view": st.column_config.NumberColumn(format="%.1f%%", step=0.5),
+            },
+        )
+        confidence = st.slider(
+            "Confidence in your views (%)", 5, 95, int(round(confidence * 100)), 5,
+            help="At 50% a view counts about as much as the market's own estimate. "
+                 "Higher moves the expected return closer to your view.",
+        ) / 100
+        views_by_name = {row["Stock"]: row["Your view"] / 100
+                         for _, row in edited.iterrows() if pd.notna(row["Your view"])}
+        no_cap = [n for n in names if n not in caps_by_name]
+        if no_cap:
+            st.caption(f"No company value found for {', '.join(no_cap)}; "
+                       "they were given the median.")
+
+    mean_returns = black_litterman.black_litterman(
+        annual_cov, market_w, risk_free, views_by_name, confidence)
+else:
+    mean_returns = stats["Annual Return"]
 
 max_sharpe = portfolio.max_sharpe_portfolio(
     mean_returns, annual_cov, risk_free_rate=risk_free, max_weight=max_weight)
@@ -515,6 +590,29 @@ with tab3:
             f"{analysis['shrinkage']:.0%} toward a simpler estimate for steadier weights."
         )
 
+    with st.expander("Where the expected returns come from"):
+        source = pd.DataFrame({"Historical average": stats["Annual Return"] * 100})
+        if return_model == "black_litterman":
+            source["Market weight"] = market_w * 100
+            source["Market-implied"] = implied * 100
+            source["Your view"] = pd.Series(views_by_name, dtype=float) * 100
+        source["Used by the optimizer"] = mean_returns * 100
+        st.dataframe(source, column_config={
+            c: st.column_config.NumberColumn(format="%.1f%%") for c in source.columns})
+        if return_model == "black_litterman":
+            st.markdown(
+                "- **Market weight**: each company's share of the total market value of "
+                "your stocks. Big companies get more.\n"
+                "- **Market-implied**: the returns investors must expect for those market "
+                "weights to be a sensible portfolio. This is the neutral starting point.\n"
+                "- **Used by the optimizer**: the market-implied returns, moved toward your "
+                "views. A view on one stock also moves stocks that are correlated with it.")
+        else:
+            st.markdown(
+                "The optimizer uses each stock's historical average, so it trusts that the "
+                "recent winners keep winning. Switch **Expected returns** to "
+                "**Black-Litterman** in the sidebar for a more neutral starting point.")
+
     cols = st.columns(3)
     for col, (name, p) in zip(cols, portfolios.items()):
         with col:
@@ -537,7 +635,7 @@ with tab3:
             hovertemplate="Return %{y:.1f}%<br>Volatility %{x:.1f}%<extra>Frontier</extra>",
         ))
         fig.add_trace(go.Scatter(
-            x=stats["Annual Volatility"] * 100, y=stats["Annual Return"] * 100,
+            x=stats["Annual Volatility"] * 100, y=mean_returns.reindex(names) * 100,
             mode="markers+text", name="Single stocks", text=names,
             textposition="top center", textfont=dict(color=GRANITE, size=11),
             marker=dict(size=9, color=GRANITE, opacity=0.6),
@@ -637,6 +735,7 @@ with tab4:
         test = backtest.run_backtest(
             returns, train_end=train_end, risk_free_rate=risk_free,
             max_weight=max_weight, benchmark_returns=bench, shrink=shrink,
+            cost=trading_cost, return_model=return_model_fn,
         )
         res = test["results"]
         growth = test["growth"]
@@ -653,6 +752,11 @@ with tab4:
             f"{'won' if beat else 'lost'}.",
             f"The optimizer predicted {pct(ms_pred)} a year and got {pct(ms_act)}. "
             f"Over the {test['test_months']}-month test, the best result came from {winner}.",
+        )
+        st.caption(
+            f"After trading costs of {trading_cost:.2%} per trade. Costs paid over the "
+            "test: " + ", ".join(f"{n} {pct(res.loc[n, 'Costs Paid'], 2)}" for n in portfolios)
+            + "."
         )
 
         cols = st.columns(len(final))
@@ -748,6 +852,7 @@ with tab5:
         rolling = backtest.rolling_backtest(
             returns, risk_free_rate=risk_free, max_weight=max_weight,
             benchmark_returns=bench, shrink=shrink,
+            cost=trading_cost, return_model=return_model_fn,
         )
     except ValueError as error:
         rolling = None
@@ -767,6 +872,11 @@ with tab5:
             f"{pct(summary.loc['Max Sharpe', 'Compounded Return'])} a year, Min Variance "
             f"{pct(summary.loc['Min Variance', 'Compounded Return'])} and equal weight "
             f"{pct(summary.loc['Equal Weight', 'Compounded Return'])}.",
+        )
+        st.caption(
+            f"After trading costs of {trading_cost:.2%} per trade, including the yearly "
+            "re-picking. Costs paid: " + ", ".join(
+                f"{n} {pct(summary.loc[n, 'Costs Paid'], 2)}" for n in portfolios) + "."
         )
 
         final_r = r_growth.iloc[-1]
@@ -811,6 +921,7 @@ with tab5:
             "Volatility": summary["Actual Volatility"] * 100,
             "Sharpe ratio": summary["Actual Sharpe"],
             "Worst drop": summary["Max Drawdown"] * 100,
+            "Costs paid": summary["Costs Paid"] * 100,
         })
         st.dataframe(
             combined,
@@ -819,6 +930,7 @@ with tab5:
                 "Volatility": st.column_config.NumberColumn(format="%.1f%%"),
                 "Sharpe ratio": st.column_config.NumberColumn(format="%.2f"),
                 "Worst drop": st.column_config.NumberColumn(format="%.1f%%"),
+                "Costs paid": st.column_config.NumberColumn(format="%.2f%%"),
             },
         )
 
@@ -849,12 +961,22 @@ current = {
     "train_end": train_end_to_save,
     "benchmark": benchmark,
     "shrinkage": bool(shrink),
+    "trading_cost": round(trading_cost, 4),
+    "return_model": return_model,
+    "views": {name_to_ticker.get(n, n): round(v, 4) for n, v in views_by_name.items()},
+    "view_confidence": round(confidence, 2),
 }
 
 saved_now = {k: config[k] for k in current}
 saved_now["max_weight"] = round(saved_now["max_weight"], 4)
 saved_now["risk_free_rate"] = round(saved_now["risk_free_rate"], 4)
 saved_now["target_return"] = round(saved_now["target_return"], 4)
+saved_now["trading_cost"] = round(saved_now["trading_cost"], 4)
+saved_now["view_confidence"] = round(saved_now["view_confidence"], 2)
+if return_model != "black_litterman":
+    # Views only apply to Black-Litterman; keep the saved ones untouched
+    current["views"] = saved_now["views"]
+    current["view_confidence"] = saved_now["view_confidence"]
 
 if st.session_state.pop("just_saved", False):
     st.toast("Saved. main.py and the dashboard now start with these settings.")
@@ -880,23 +1002,35 @@ with st.sidebar:
     st.subheader("Report")
     if st.button(
         "📄 Generate report", type="primary",
-        help="Creates a PDF report with the settings shown on screen and saves "
-             "it in the reports folder.",
+        help="Creates a PDF report and an Excel file with all the numbers, using the "
+             "settings shown on screen, and saves both in the reports folder.",
     ):
-        with st.spinner("Building the report..."):
-            pdf = report.build_report(prices, current, bench, currency_info)
-            path = report.save_report(pdf)
-        st.session_state["report"] = {"signature": signature, "pdf": pdf, "path": path}
+        with st.spinner("Building the report and the Excel file..."):
+            results = full_analysis.run(prices, current, bench, market_caps)
+            pdf = report.build_report(prices, current, bench, currency_info,
+                                      market_caps, results=results)
+            xlsx = export.build_excel(results, current, currency_info)
+            st.session_state["report"] = {
+                "signature": signature,
+                "pdf": pdf, "path": report.save_report(pdf),
+                "xlsx": xlsx, "xlsx_path": export.save_excel(xlsx),
+            }
 
     stored = st.session_state.get("report")
     if stored and stored["signature"] == signature:
-        relative = os.path.relpath(stored["path"], settings.PROJECT_ROOT)
-        st.success(f"Saved to {relative}")
+        folder = os.path.relpath(os.path.dirname(stored["path"]), settings.PROJECT_ROOT)
+        st.success(f"Saved in the {folder} folder")
         st.download_button(
-            "⬇ Download PDF",
+            "⬇ Download PDF report",
             data=stored["pdf"],
             file_name=os.path.basename(stored["path"]),
             mime="application/pdf",
+        )
+        st.download_button(
+            "⬇ Download Excel file",
+            data=stored["xlsx"],
+            file_name=os.path.basename(stored["xlsx_path"]),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     elif stored:
         st.caption("You changed the settings after the last report. "

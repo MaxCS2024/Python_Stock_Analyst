@@ -11,6 +11,10 @@ you never see the future when you choose your portfolio.
 
 Weights are kept fixed in the test period (rebalanced back to the
 target weights every month).
+
+Trading costs: every trade costs a percentage of the value traded, like a
+broker's fee. The portfolio pays it when it is first bought, when it is
+rebalanced each month, and when the weights are re-picked.
 """
 
 import numpy as np
@@ -39,12 +43,16 @@ def split_returns(returns, train_end):
     return train, test
 
 
-def build_portfolios(train_returns, risk_free_rate, max_weight, shrink=False):
+def build_portfolios(train_returns, risk_free_rate, max_weight, shrink=False,
+                     return_model=None):
     """Pick the weights using only the training data."""
 
     statistics = calculations.calculate_statistics(train_returns)
     _, annual_cov = calculations.calculate_covariance(train_returns, shrink)
-    mean_returns = statistics["Annual Return"]
+    if return_model is None:
+        mean_returns = statistics["Annual Return"]
+    else:
+        mean_returns = return_model(train_returns, annual_cov)
 
     return {
         "Max Sharpe": portfolio.max_sharpe_portfolio(
@@ -64,6 +72,45 @@ def build_portfolios(train_returns, risk_free_rate, max_weight, shrink=False):
 def portfolio_monthly_returns(test_returns, weights):
     """Each month's portfolio return = weighted sum of the stock returns."""
     return test_returns[weights.index] @ weights
+
+
+def simulate(test_returns, target, cost=0.0, start=None):
+    """
+    Hold the target weights, rebalancing every month, and pay trading costs.
+
+    test_returns: monthly stock returns
+    target:       the weights to hold (a Series, one per stock)
+    cost:         cost per trade as a fraction of the value traded (0.001 = 0.1%)
+    start:        the weights held before the first month; None means starting
+                  from cash, so the whole portfolio has to be bought
+
+    Returns (net monthly returns, weights held at the end, cost paid each month).
+
+    Each month: trade from what you hold to the target weights and pay
+    cost x (total value traded), then the stocks move and the weights drift.
+    """
+    r = test_returns[target.index]
+    if start is None:
+        held = pd.Series(0.0, index=target.index)
+    else:
+        held = start.reindex(target.index).fillna(0.0)
+
+    net, paid = [], []
+    for _, month in r.iterrows():
+        turnover = (target - held).abs().sum()        # value traded, as a share
+        fee = cost * turnover
+        gross = float(target @ month)
+        net.append((1 - fee) * (1 + gross) - 1)
+        paid.append(fee)
+        held = target * (1 + month) / (1 + gross)     # weights drift with prices
+
+    return (pd.Series(net, index=r.index), held,
+            pd.Series(paid, index=r.index))
+
+
+def costs_paid(fees):
+    """Total share of the portfolio paid in trading costs."""
+    return 1 - (1 - fees).prod()
 
 
 def performance(monthly_returns, risk_free_rate):
@@ -92,7 +139,8 @@ def performance(monthly_returns, risk_free_rate):
 
 
 def run_backtest(returns, train_end, risk_free_rate=0.02, max_weight=1.0,
-                 benchmark_returns=None, shrink=False):
+                 benchmark_returns=None, shrink=False, cost=0.0,
+                 return_model=None):
     """
     Run the full backtest.
 
@@ -100,21 +148,25 @@ def run_backtest(returns, train_end, risk_free_rate=0.02, max_weight=1.0,
     train_end:         last date of the training period, e.g. "2024-12-31"
     benchmark_returns: optional monthly returns of an index, e.g. OMXS30
     shrink:            use Ledoit-Wolf shrinkage when picking the weights
+    cost:              trading cost per trade (0.001 = 0.1%)
+    return_model:      optional function (training returns, covariance) ->
+                       expected returns, e.g. Black-Litterman. None = history.
     """
     train, test = split_returns(returns, train_end)
-    portfolios = build_portfolios(train, risk_free_rate, max_weight, shrink)
+    portfolios = build_portfolios(train, risk_free_rate, max_weight, shrink, return_model)
 
     rows = {}
     monthly = {}
 
     for name, p in portfolios.items():
-        monthly[name] = portfolio_monthly_returns(test, p["weights"])
+        monthly[name], _, fees = simulate(test, p["weights"], cost)
         row = {
             "Predicted Return": p["return"],
             "Predicted Volatility": p["volatility"],
             "Predicted Sharpe": p["sharpe"],
         }
         row.update(performance(monthly[name], risk_free_rate))
+        row["Costs Paid"] = costs_paid(fees)
         rows[name] = row
 
     if benchmark_returns is not None:
@@ -190,8 +242,11 @@ def print_backtest(backtest):
     print(table[["Predicted Return", "Actual Return",
                  "Predicted Volatility", "Actual Volatility"]].to_string())
 
+    table["Costs Paid"] = results["Costs Paid"].map(
+        lambda x: "-" if pd.isna(x) else f"{x:.2%}")
+
     print("\nTEST PERIOD RESULTS")
-    print(table[["Total Return", "Max Drawdown",
+    print(table[["Total Return", "Max Drawdown", "Costs Paid",
                  "Predicted Sharpe", "Actual Sharpe"]].to_string())
 
 
@@ -200,7 +255,8 @@ def print_backtest(backtest):
 # ---------------------------------------------------------------
 
 def rolling_backtest(returns, risk_free_rate=0.02, max_weight=1.0,
-                     benchmark_returns=None, shrink=False, min_train_months=24):
+                     benchmark_returns=None, shrink=False, min_train_months=24,
+                     cost=0.0, return_model=None):
     """
     A fairer test than a single split: every calendar year, pick new weights
     using all data up to the end of the previous year, then hold them for
@@ -226,17 +282,22 @@ def rolling_backtest(returns, risk_free_rate=0.02, max_weight=1.0,
 
     names = ["Max Sharpe", "Min Variance", "Equal Weight"]
     monthly = {name: [] for name in names}
+    fees = {name: [] for name in names}
+    held = {name: None for name in names}      # start from cash
     year_rows = []
 
     for year in test_years:
         train = returns[returns.index <= pd.Timestamp(f"{year - 1}-12-31")]
         test = returns[returns.index.year == year]
-        portfolios = build_portfolios(train, risk_free_rate, max_weight, shrink)
+        portfolios = build_portfolios(train, risk_free_rate, max_weight, shrink,
+                                      return_model)
 
         row = {"Year": str(year) if len(test) == 12 else f"{year} ({len(test)} mo)"}
         for name in names:
-            r = portfolio_monthly_returns(test, portfolios[name]["weights"])
+            r, held[name], paid = simulate(test, portfolios[name]["weights"], cost,
+                                           start=held[name])
             monthly[name].append(r)
+            fees[name].append(paid)
             row[name] = (1 + r).prod() - 1
         year_rows.append(row)
 
@@ -260,6 +321,8 @@ def rolling_backtest(returns, risk_free_rate=0.02, max_weight=1.0,
     summary = pd.DataFrame(
         {name: performance(r, risk_free_rate) for name, r in monthly.items()}
     ).T
+    summary["Costs Paid"] = pd.Series(
+        {name: costs_paid(pd.concat(fees[name])) for name in names})
 
     growth = (1 + pd.DataFrame(monthly)).cumprod() * 100
     start = returns.index[returns.index < growth.index[0]][-1]
@@ -302,6 +365,7 @@ def print_rolling(rolling):
     print("\nALL TEST YEARS COMBINED")
     print(pd.DataFrame({
         "Compounded per year": summary["Compounded Return"].map(lambda x: f"{x:.1%}"),
+        "Costs paid": summary["Costs Paid"].map(lambda x: "-" if pd.isna(x) else f"{x:.2%}"),
         "Volatility": summary["Actual Volatility"].map(lambda x: f"{x:.1%}"),
         "Sharpe": summary["Actual Sharpe"].map(lambda x: f"{x:.2f}"),
         "Worst drop": summary["Max Drawdown"].map(lambda x: f"{x:.1%}"),

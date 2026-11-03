@@ -17,7 +17,7 @@ Page 6:  5. Year by year (rolling backtest)
 import io
 import math
 import os
-from datetime import date
+from datetime import date, datetime
 from xml.sax.saxutils import escape
 
 import numpy as np
@@ -33,7 +33,7 @@ from reportlab.platypus import (
     Spacer, Table, TableStyle,
 )
 
-from src import backtest, calculations, currency, portfolio, settings
+from src import analysis, currency, settings
 
 
 # ---------------------------------------------------------------
@@ -246,15 +246,17 @@ def _heatmap_chart(corr, scale=1.0):
     return _figure_to_image(fig, size, size * 0.85)
 
 
-def _frontier_chart(frontier, stats, portfolios, target, target_return, scale=1.0):
+def _frontier_chart(frontier, stats, portfolios, target, target_return, scale=1.0,
+                    expected=None):
+    """expected: the expected returns the optimizer used (default: historical)."""
     fig, ax = _new_figure(174, 88 * scale)
+    y = (stats["Annual Return"] if expected is None else expected.reindex(stats.index))
     ax.plot(frontier["Volatility"] * 100, frontier["Return"] * 100, color=INK,
             linewidth=2, label="Efficient frontier", zorder=2)
-    ax.scatter(stats["Annual Volatility"] * 100, stats["Annual Return"] * 100,
+    ax.scatter(stats["Annual Volatility"] * 100, y * 100,
                s=22, color="#94A3B8", zorder=3, label="Single stocks")
     for name in stats.index:
-        ax.annotate(name, (stats.loc[name, "Annual Volatility"] * 100,
-                           stats.loc[name, "Annual Return"] * 100),
+        ax.annotate(name, (stats.loc[name, "Annual Volatility"] * 100, y[name] * 100),
                     xytext=(4, 3), textcoords="offset points", fontsize=6.5, color=MUTED)
     markers = {"Max Sharpe": "*", "Min Variance": "D", "Equal Weight": "s"}
     for name, p in portfolios.items():
@@ -323,7 +325,8 @@ def _footer(created, pages_seen):
 # The report
 # ---------------------------------------------------------------
 
-def build_report(prices, config, benchmark_returns=None, currency_info=None):
+def build_report(prices, config, benchmark_returns=None, currency_info=None,
+                 market_caps=None, results=None):
     """
     Build the PDF report and return it as bytes.
 
@@ -331,58 +334,38 @@ def build_report(prices, config, benchmark_returns=None, currency_info=None):
     config:            settings dict (see src/settings.py)
     benchmark_returns: optional monthly index returns, named after the index
     currency_info:     optional table from currency.convert_to_sek()
+    market_caps:       {ticker: market value in SEK}, for Black-Litterman
+    results:           optional results from analysis.run(), to avoid calculating twice
     """
     created = date.today().isoformat()
 
-    # --- Calculations (same as main.py and the dashboard) ---
-    prices = prices.rename(columns=settings.display_name)
-    shrink = config.get("shrinkage", False)
-    analysis = calculations.calculate_all(prices, shrink=shrink)
-    returns = analysis["returns"]
-    stats = analysis["statistics"]
-    corr = analysis["correlation"]
-    annual_cov = analysis["annual_covariance"]
-    mean_returns = stats["Annual Return"]
-    names = list(stats.index)
+    # --- Calculations (shared with the Excel export, see src/analysis.py) ---
+    if results is None:
+        results = analysis.run(prices, config, benchmark_returns, market_caps)
+    prices = results["prices"]
+    returns = results["returns"]
+    stats = results["statistics"]
+    corr = results["correlation"]
+    names = results["names"]
     color_of = {n: STOCK_COLORS[i % len(STOCK_COLORS)] for i, n in enumerate(names)}
 
-    rf = config["risk_free_rate"]
-    target_return = config["target_return"]
-    max_weight = config["max_weight"]
-    if max_weight * len(names) < 1:
-        max_weight = math.ceil(100 / len(names)) / 100
+    rf = results["risk_free_rate"]
+    target_return = results["target_return"]
+    max_weight = results["max_weight"]
+    shrink = bool(config.get("shrinkage", False))
+    cost = results["trading_cost"]
+    bl_on = results["return_model"] == "black_litterman"
+    expected = results["expected_returns"]
 
-    max_sharpe = portfolio.max_sharpe_portfolio(
-        mean_returns, annual_cov, risk_free_rate=rf, max_weight=max_weight)
-    min_var = portfolio.min_variance_portfolio(
-        mean_returns, annual_cov, risk_free_rate=rf, max_weight=max_weight)
-    equal = portfolio.equal_weight_portfolio(mean_returns, annual_cov, risk_free_rate=rf)
-    portfolios = {"Max Sharpe": max_sharpe, "Min Variance": min_var, "Equal Weight": equal}
-    frontier = portfolio.efficient_frontier(mean_returns, annual_cov, max_weight=max_weight)
-
-    try:
-        target = portfolio.min_variance_portfolio(
-            mean_returns, annual_cov, target_return=target_return,
-            risk_free_rate=rf, max_weight=max_weight)
-        target_note = None
-    except ValueError as error:
-        target, target_note = None, str(error)
-
-    try:
-        test = backtest.run_backtest(
-            returns, train_end=config["train_end"], risk_free_rate=rf,
-            max_weight=max_weight, benchmark_returns=benchmark_returns, shrink=shrink)
-        test_note = None
-    except ValueError as error:
-        test, test_note = None, str(error)
-
-    try:
-        rolling = backtest.rolling_backtest(
-            returns, risk_free_rate=rf, max_weight=max_weight,
-            benchmark_returns=benchmark_returns, shrink=shrink)
-        rolling_note = None
-    except ValueError as error:
-        rolling, rolling_note = None, str(error)
+    portfolios = results["portfolios"]
+    max_sharpe = portfolios["Max Sharpe"]
+    min_var = portfolios["Min Variance"]
+    equal = portfolios["Equal Weight"]
+    frontier = results["frontier"]
+    target, target_note = results["target"], results["target_note"]
+    test, test_note = results["test"], results["test_note"]
+    rolling, rolling_note = results["rolling"], results["rolling_note"]
+    shrinkage_intensity = results["shrinkage"]
 
     pairs = corr.where(np.triu(np.ones(corr.shape, dtype=bool), k=1)).stack()
     period = f"{returns.index[0]:%b %Y} to {returns.index[-1]:%b %Y}"
@@ -420,8 +403,15 @@ def build_report(prices, config, benchmark_returns=None, currency_info=None):
                 if config["benchmark"] in settings.BENCHMARKS else "")],
             ["Risk-free rate", _pct(rf, 2)],
             ["Target return", _pct(target_return)],
-            ["Covariance", (f"Ledoit-Wolf shrinkage (intensity {analysis['shrinkage']:.0%})"
+            ["Covariance", (f"Ledoit-Wolf shrinkage (intensity {shrinkage_intensity:.0%})"
                             if shrink else "Normal sample estimate (no shrinkage)")],
+            ["Expected returns", (
+                "Black-Litterman: market-implied" + (
+                    f", with {len(config.get('views', {}))} view(s) at "
+                    f"{config.get('view_confidence', 0.5):.0%} confidence"
+                    if config.get("views") else ", no views")
+                if bl_on else "Historical average")],
+            ["Trading costs", f"{cost:.2%} of the value of every trade, in the backtests"],
         ]
         if test is not None:
             tr0, tr1 = test["train_period"]
@@ -483,7 +473,7 @@ def build_report(prices, config, benchmark_returns=None, currency_info=None):
             story.append(_p("Backtest (weights chosen without seeing the test period)", "h2"))
             res = test["results"]
             rows = [["Portfolio", "Predicted", "Actual", "Total return", "Worst drop",
-                     "Actual Sharpe"]]
+                     "Costs paid", "Sharpe"]]
             for name in res.index:
                 rows.append([
                     name,
@@ -491,13 +481,16 @@ def build_report(prices, config, benchmark_returns=None, currency_info=None):
                     _pct(res.loc[name, "Actual Return"]),
                     _pct(res.loc[name, "Total Return"]),
                     _pct(res.loc[name, "Max Drawdown"]),
+                    _pct(res.loc[name].get("Costs Paid"), 2),
                     f"{res.loc[name, 'Actual Sharpe']:.2f}",
                 ])
-            story.append(_table(rows, [38 * mm, 24 * mm, 24 * mm, 28 * mm, 26 * mm,
-                                       CONTENT_WIDTH - 140 * mm], number_cols=(1, 2, 3, 4, 5)))
+            story.append(_table(rows, [36 * mm, 21 * mm, 21 * mm, 25 * mm, 24 * mm, 24 * mm,
+                                       CONTENT_WIDTH - 151 * mm],
+                                number_cols=(1, 2, 3, 4, 5, 6)))
             story.append(Spacer(1, 4))
-            story.append(_p("Predicted and actual are returns per year. Total return and "
-                            "worst drop cover the whole test period.", "small"))
+            story.append(_p("Predicted and actual are returns per year. Total return, worst "
+                            "drop and costs paid cover the whole test period. Results are "
+                            f"after trading costs of {cost:.2%} per trade.", "small"))
 
         story.append(PageBreak())
 
@@ -593,20 +586,21 @@ def build_report(prices, config, benchmark_returns=None, currency_info=None):
             f"{_pct(max_sharpe['volatility'])} volatility, using {len(used)} of "
             f"{len(names)} stocks.", "lead"))
         story.append(chart("frontier", scales["mix"], lambda s: _frontier_chart(
-            frontier, stats, portfolios, target, target_return, s)))
+            frontier, stats, portfolios, target, target_return, s, expected)))
 
         story.append(_p(f"Where the money goes (cap {max_weight:.0%} per stock)", "h2"))
         weight_cols = dict(portfolios)
         if target is not None:
             weight_cols[f"Target {target_return:.0%}"] = target
-        header = ["Stock"] + list(weight_cols.keys())
+        header = ["Stock", "Expected return"] + list(weight_cols.keys())
         rows = [header]
         weights = pd.DataFrame({n: p["weights"] for n, p in weight_cols.items()})
         weights = weights.loc[weights["Max Sharpe"].sort_values(ascending=False).index]
         for name, r in weights.iterrows():
-            rows.append([name] + [_pct(v) if v >= 0.0005 else "-" for v in r])
-        other = (CONTENT_WIDTH - 45 * mm) / (len(header) - 1)
-        story.append(_table(rows, [45 * mm] + [other] * (len(header) - 1),
+            rows.append([name, _pct(expected[name])]
+                        + [_pct(v) if v >= 0.0005 else "-" for v in r])
+        other = (CONTENT_WIDTH - 40 * mm) / (len(header) - 1)
+        story.append(_table(rows, [40 * mm] + [other] * (len(header) - 1),
                             number_cols=tuple(range(1, len(header)))))
         if target_note:
             story.append(Spacer(1, 4))
@@ -617,8 +611,14 @@ def build_report(prices, config, benchmark_returns=None, currency_info=None):
             "risk. Single stocks sit below it.",
             "<b>Max Sharpe</b> has the best return per unit of risk. <b>Min Variance</b> has "
             "the lowest risk and ignores return forecasts, which makes it more reliable.",
+            ("<b>Expected return</b> comes from Black-Litterman: the returns that make the "
+             "market's own weights (big companies get most) a sensible portfolio, adjusted "
+             "for any views you entered. This avoids betting on last year's winners."
+             if bl_on else
+             "<b>Expected return</b> is the historical average. The optimizer trusts it "
+             "completely, which is why it favours the stocks that did best recently."),
             "These numbers use the same data the optimizer learned from, so they are a best "
-            "case. The backtest on the next page is the honest test.",
+            "case. The backtests on the next pages are the honest test.",
         ]))
         story.append(PageBreak())
 
@@ -705,13 +705,13 @@ def build_report(prices, config, benchmark_returns=None, currency_info=None):
             story.append(_p("All test years combined", "h2"))
             summary = rolling["summary"]
             rows = [["Portfolio", "Compounded per year", "Volatility", "Sharpe ratio",
-                     "Worst drop"]]
+                     "Worst drop", "Costs paid"]]
             for name, row in summary.iterrows():
                 rows.append([name, _pct(row["Compounded Return"]),
                              _pct(row["Actual Volatility"]), f"{row['Actual Sharpe']:.2f}",
-                             _pct(row["Max Drawdown"])])
-            story.append(_table(rows, [42 * mm, 36 * mm, 30 * mm, 30 * mm,
-                                       CONTENT_WIDTH - 138 * mm], number_cols=(1, 2, 3, 4)))
+                             _pct(row["Max Drawdown"]), _pct(row.get("Costs Paid"), 2)])
+            story.append(_table(rows, [38 * mm, 34 * mm, 25 * mm, 25 * mm, 25 * mm,
+                                       CONTENT_WIDTH - 147 * mm], number_cols=(1, 2, 3, 4, 5)))
 
             story.append(_note_box("How to read this", [
                 "Every January the weights are chosen again, using all data up to the end "
@@ -721,6 +721,9 @@ def build_report(prices, config, benchmark_returns=None, currency_info=None):
                 "strategy that wins most years is more likely to be real than lucky.",
                 "<b>Compounded per year</b> is what the money actually grew by over all "
                 "the test years together.",
+                f"<b>Costs paid</b>: every trade costs {cost:.2%} of its value, including the "
+                "first purchase, the monthly rebalancing and the yearly re-picking. A "
+                "strategy that trades a lot needs to win by more than its costs.",
             ]))
 
         return story
@@ -758,11 +761,26 @@ def build_report(prices, config, benchmark_returns=None, currency_info=None):
     return pdf
 
 
-def save_report(pdf_bytes, folder=None):
-    """Save the report as reports/portfolio_report_YYYY-MM-DD.pdf and return the path."""
-    folder = folder or os.path.join(settings.PROJECT_ROOT, "reports")
+def unique_path(folder, stem, extension):
+    """
+    A file path with the date and time in it, e.g.
+    reports/portfolio_report_2026-11-03_1452.pdf. If a file with that name
+    already exists (two reports in the same minute), _2, _3 ... is added.
+    """
     os.makedirs(folder, exist_ok=True)
-    path = os.path.join(folder, f"portfolio_report_{date.today().isoformat()}.pdf")
+    base = f"{stem}_{datetime.now():%Y-%m-%d_%H%M}"
+    path = os.path.join(folder, f"{base}.{extension}")
+    n = 2
+    while os.path.exists(path):
+        path = os.path.join(folder, f"{base}_{n}.{extension}")
+        n += 1
+    return path
+
+
+def save_report(pdf_bytes, folder=None):
+    """Save the report in the reports folder and return the path."""
+    folder = folder or os.path.join(settings.PROJECT_ROOT, "reports")
+    path = unique_path(folder, "portfolio_report", "pdf")
     with open(path, "wb") as f:
         f.write(pdf_bytes)
     return path
