@@ -28,7 +28,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import (
-    Image, KeepTogether, PageBreak, Paragraph, SimpleDocTemplate,
+    Flowable, Image, KeepTogether, PageBreak, Paragraph, SimpleDocTemplate,
     Spacer, Table, TableStyle,
 )
 
@@ -48,8 +48,8 @@ PORTFOLIO_COLORS = {
     "Max Sharpe": "#1F6FEB",
     "Min Variance": "#0F9D58",
     "Equal Weight": "#EA580C",
-    "OMXS30": "#64748B",
 }
+BENCHMARK_COLOR = "#64748B"
 TARGET_COLOR = "#E8204F"
 STOCK_COLORS = [
     "#1F6FEB", "#0F9D58", "#EA580C", "#E8204F", "#8B3DF0",
@@ -196,8 +196,8 @@ def _figure_to_image(fig, width_mm, height_mm):
 # Charts
 # ---------------------------------------------------------------
 
-def _growth_chart(prices, color_of):
-    fig, ax = _new_figure(174, 60)
+def _growth_chart(prices, color_of, scale=1.0):
+    fig, ax = _new_figure(174, 60 * scale)
     growth = prices.dropna()
     growth = growth / growth.iloc[0] * 100
     for name in growth.columns:
@@ -206,11 +206,11 @@ def _growth_chart(prices, color_of):
     ax.set_ylabel("Value of 100 kr", fontsize=7.5, color=MUTED)
     ax.legend(fontsize=6.5, ncol=min(5, len(growth.columns)), frameon=False,
               loc="upper left")
-    return _figure_to_image(fig, 174, 60)
+    return _figure_to_image(fig, 174, 60 * scale)
 
 
-def _risk_return_chart(stats, color_of):
-    fig, ax = _new_figure(174, 56)
+def _risk_return_chart(stats, color_of, scale=1.0):
+    fig, ax = _new_figure(174, 56 * scale)
     for name in stats.index:
         x = stats.loc[name, "Annual Volatility"] * 100
         y = stats.loc[name, "Annual Return"] * 100
@@ -219,11 +219,11 @@ def _risk_return_chart(stats, color_of):
                     fontsize=7, color=INK)
     ax.set_xlabel("Volatility per year (%)", fontsize=7.5, color=MUTED)
     ax.set_ylabel("Return per year (%)", fontsize=7.5, color=MUTED)
-    return _figure_to_image(fig, 174, 56)
+    return _figure_to_image(fig, 174, 56 * scale)
 
 
-def _heatmap_chart(corr):
-    size = 120 if len(corr) <= 10 else 150
+def _heatmap_chart(corr, scale=1.0):
+    size = (120 if len(corr) <= 10 else 150) * scale
     fig = Figure(figsize=(size / 25.4, size * 0.85 / 25.4), dpi=200)
     ax = fig.add_subplot(111)
     cmap = LinearSegmentedColormap.from_list("gr", ["#16A34A", "#FFFFFF", "#DC2626"])
@@ -245,8 +245,8 @@ def _heatmap_chart(corr):
     return _figure_to_image(fig, size, size * 0.85)
 
 
-def _frontier_chart(frontier, stats, portfolios, target, target_return):
-    fig, ax = _new_figure(174, 88)
+def _frontier_chart(frontier, stats, portfolios, target, target_return, scale=1.0):
+    fig, ax = _new_figure(174, 88 * scale)
     ax.plot(frontier["Volatility"] * 100, frontier["Return"] * 100, color=INK,
             linewidth=2, label="Efficient frontier", zorder=2)
     ax.scatter(stats["Annual Volatility"] * 100, stats["Annual Return"] * 100,
@@ -267,27 +267,44 @@ def _frontier_chart(frontier, stats, portfolios, target, target_return):
     ax.set_xlabel("Volatility per year (%)", fontsize=7.5, color=MUTED)
     ax.set_ylabel("Return per year (%)", fontsize=7.5, color=MUTED)
     ax.legend(fontsize=6.5, frameon=False, loc="lower right")
-    return _figure_to_image(fig, 174, 88)
+    return _figure_to_image(fig, 174, 88 * scale)
 
 
-def _backtest_chart(growth):
-    fig, ax = _new_figure(174, 62)
+def _backtest_chart(growth, scale=1.0):
+    fig, ax = _new_figure(174, 62 * scale)
     for name in growth.columns:
-        ax.plot(growth.index, growth[name], color=PORTFOLIO_COLORS.get(name, MUTED),
-                linewidth=1.8, linestyle="--" if name == "OMXS30" else "-",
+        is_portfolio = name in PORTFOLIO_COLORS
+        ax.plot(growth.index, growth[name],
+                color=PORTFOLIO_COLORS.get(name, BENCHMARK_COLOR),
+                linewidth=1.8, linestyle="-" if is_portfolio else "--",
                 label=f"{name} ({growth[name].iloc[-1]:.0f} kr)")
     ax.axhline(100, color=MUTED, linewidth=0.8, alpha=0.6)
     ax.set_ylabel("Value of 100 kr", fontsize=7.5, color=MUTED)
     ax.legend(fontsize=7, frameon=False, loc="upper left")
-    return _figure_to_image(fig, 174, 62)
+    return _figure_to_image(fig, 174, 62 * scale)
+
+
+class _SectionStart(Flowable):
+    """Invisible marker that records the page a section starts on."""
+
+    def __init__(self, record, name):
+        super().__init__()
+        self.record, self.name = record, name
+
+    def wrap(self, available_width, available_height):
+        return 0, 0
+
+    def draw(self):
+        self.record[self.name] = self.canv.getPageNumber()
 
 
 # ---------------------------------------------------------------
 # Page header/footer
 # ---------------------------------------------------------------
 
-def _footer(created):
+def _footer(created, pages_seen):
     def draw(canvas, doc):
+        pages_seen.append(doc.page)
         canvas.saveState()
         canvas.setStrokeColor(colors.HexColor(GRID))
         canvas.line(MARGIN, 14 * mm, PAGE_WIDTH - MARGIN, 14 * mm)
@@ -311,7 +328,7 @@ def build_report(prices, config, benchmark_returns=None, currency_info=None):
 
     prices:            monthly prices in SEK, one column per stock (tickers or names)
     config:            settings dict (see src/settings.py)
-    benchmark_returns: optional monthly index returns (e.g. OMXS30)
+    benchmark_returns: optional monthly index returns, named after the index
     currency_info:     optional table from currency.convert_to_sek()
     """
     created = date.today().isoformat()
@@ -360,268 +377,312 @@ def build_report(prices, config, benchmark_returns=None, currency_info=None):
     pairs = corr.where(np.triu(np.ones(corr.shape, dtype=bool), k=1)).stack()
     period = f"{returns.index[0]:%b %Y} to {returns.index[-1]:%b %Y}"
 
-    story = []
+    drawn = {}
 
-    # ===========================================================
-    # Page 1: Summary
-    # ===========================================================
-    story.append(_p("Portfolio report", "title"))
-    story.append(_p(
-        f"Created {created}. {len(names)} stocks, monthly data from {period} "
-        f"({len(returns)} months).", "subtitle"))
+    def chart(name, scale, draw):
+        """Charts are slow to draw, so each chart is drawn once per size."""
+        if (name, scale) not in drawn:
+            drawn[(name, scale)] = draw(scale)
+        return drawn[(name, scale)]
 
-    settings_rows = [
-        ["Setting", "Value"],
-        ["Stocks", Paragraph(_join(names), STYLES["cell"])],
-        ["Period", period],
-        ["Currency", "All values in SEK" + (
-            f", converted from {currency.describe(currency_info)}"
-            if currency_info is not None else "")],
-        ["Max weight per stock", f"{max_weight:.0%} (no short selling)"],
-        ["Risk-free rate", _pct(rf, 2)],
-        ["Target return", _pct(target_return)],
-    ]
-    if test is not None:
-        tr0, tr1 = test["train_period"]
-        te0, te1 = test["test_period"]
-        settings_rows.append(["Backtest",
-                              f"Weights chosen on {tr0:%b %Y} to {tr1:%b %Y}, "
-                              f"tested on {te0:%b %Y} to {te1:%b %Y}"])
-    story.append(_table(settings_rows, [45 * mm, CONTENT_WIDTH - 45 * mm]))
+    def make_story(scales, marks):
+        story = []
 
-    # Key findings
-    best = stats["Annual Return"].idxmax()
-    calmest = stats["Annual Volatility"].idxmin()
-    avg_vol = stats["Annual Volatility"].mean()
-    used = max_sharpe["weights"][max_sharpe["weights"] > 0.005]
-    top = used.nlargest(min(3, len(used)))
-
-    findings = [
-        f"<b>{escape(best)}</b> had the highest return, about "
-        f"{_pct(stats.loc[best, 'Annual Return'])} a year. <b>{escape(calmest)}</b> was the "
-        f"calmest, with {_pct(stats.loc[calmest, 'Annual Volatility'])} volatility.",
-        f"Holding all {len(names)} stocks equally cut volatility from "
-        f"{_pct(avg_vol)} (average single stock) to {_pct(equal['volatility'])}. "
-        f"That is the diversification effect.",
-        f"The best risk-adjusted mix (Max Sharpe) expects {_pct(max_sharpe['return'])} a "
-        f"year at {_pct(max_sharpe['volatility'])} volatility. {_join(top.index)} make up "
-        f"{_pct(top.sum(), 0)} of it.",
-    ]
-    if test is not None:
-        res, final = test["results"], test["growth"].iloc[-1]
-        winner = final.idxmax()
-        findings.append(
-            f"In the backtest, 100 kr in Max Sharpe became {final['Max Sharpe']:.0f} kr, "
-            f"against {final['Equal Weight']:.0f} kr for equal weight. The best result "
-            f"came from {escape(winner)}. The optimizer predicted "
-            f"{_pct(res.loc['Max Sharpe', 'Predicted Return'])} a year and got "
-            f"{_pct(res.loc['Max Sharpe', 'Actual Return'])}.")
-
-    story.append(_p("Key findings", "h2"))
-    for f in findings:
-        story.append(Paragraph(f, STYLES["bullet"], bulletText="•"))
-
-    story.append(_p("Portfolios (measured on the full period)", "h2"))
-    rows = [["Portfolio", "Expected return", "Volatility", "Sharpe ratio"]]
-    for name, p in portfolios.items():
-        rows.append([name, _pct(p["return"]), _pct(p["volatility"]), f"{p['sharpe']:.2f}"])
-    if target is not None:
-        rows.append([f"Target {target_return:.0%}", _pct(target["return"]),
-                     _pct(target["volatility"]), f"{target['sharpe']:.2f}"])
-    story.append(_table(rows, [55 * mm, 40 * mm, 40 * mm, CONTENT_WIDTH - 135 * mm],
-                        number_cols=(1, 2, 3)))
-
-    if test is not None:
-        story.append(_p("Backtest (weights chosen without seeing the test period)", "h2"))
-        res = test["results"]
-        rows = [["Portfolio", "Predicted", "Actual", "Total return", "Worst drop",
-                 "Actual Sharpe"]]
-        for name in res.index:
-            rows.append([
-                name,
-                _pct(res.loc[name].get("Predicted Return")),
-                _pct(res.loc[name, "Actual Return"]),
-                _pct(res.loc[name, "Total Return"]),
-                _pct(res.loc[name, "Max Drawdown"]),
-                f"{res.loc[name, 'Actual Sharpe']:.2f}",
-            ])
-        story.append(_table(rows, [38 * mm, 24 * mm, 24 * mm, 28 * mm, 26 * mm,
-                                   CONTENT_WIDTH - 140 * mm], number_cols=(1, 2, 3, 4, 5)))
-        story.append(Spacer(1, 4))
-        story.append(_p("Predicted and actual are returns per year. Total return and "
-                        "worst drop cover the whole test period.", "small"))
-
-    story.append(PageBreak())
-
-    # ===========================================================
-    # Page 2: The stocks
-    # ===========================================================
-    story.append(_p("1. The stocks", "h1"))
-    story.append(_p(
-        f"{escape(best)} grew the most, about {_pct(stats.loc[best, 'Annual Return'])} a "
-        f"year. Return per unit of risk (the Sharpe ratio) is the fairest way to "
-        f"compare them.", "lead"))
-
-    ranked = stats.assign(Sharpe=(stats["Annual Return"] - rf) / stats["Annual Volatility"])
-    ranked = ranked.sort_values("Sharpe", ascending=False)
-    rows = [["Stock", "Return per year", "Volatility per year", "Return per unit of risk",
-             "Verdict"]]
-    for name, r in ranked.iterrows():
-        rows.append([name, _pct(r["Annual Return"]), _pct(r["Annual Volatility"]),
-                     f"{r['Sharpe']:.2f}", _sharpe_verdict(r["Sharpe"])])
-    story.append(_table(rows, [42 * mm, 30 * mm, 34 * mm, 40 * mm,
-                               CONTENT_WIDTH - 146 * mm], number_cols=(1, 2, 3)))
-
-    story.append(_p("What 100 kr became", "h2"))
-    story.append(_growth_chart(prices.loc[:, names], color_of))
-    story.append(_p("Return vs risk (up and to the left is better)", "h2"))
-    story.append(_risk_return_chart(stats, color_of))
-    story.append(_note_box("How to read this", [
-        "<b>Return per year</b>: average monthly return x 12, dividends included. "
-        "5-10% is normal for stocks over the long run.",
-        "<b>Volatility</b>: how much the price swings. 18-25% is normal for a large "
-        "company; above 30% is wild.",
-        "<b>Return per unit of risk</b>: below 0.3 is poor, 0.3-0.7 OK, 0.7-1.0 good, "
-        "above 1.0 excellent.",
-    ]))
-    story.append(PageBreak())
-
-    # ===========================================================
-    # Page 3: Correlation
-    # ===========================================================
-    alike, different = pairs.idxmax(), pairs.idxmin()
-    story.append(_p("2. How they move together", "h1"))
-    story.append(_p(
-        f"Holding all {len(names)} stocks equally gives {_pct(equal['volatility'])} "
-        f"volatility, against {_pct(avg_vol)} for the average single stock.", "lead"))
-    story.append(_heatmap_chart(corr))
-
-    story.append(_p("Risk alone vs together", "h2"))
-    rows = [["", "Volatility per year"],
-            ["Average single stock", _pct(avg_vol)],
-            ["Equal weight portfolio", _pct(equal["volatility"])],
-            ["Min variance portfolio", _pct(min_var["volatility"])]]
-    story.append(_table(rows, [70 * mm, 45 * mm], number_cols=(1,)))
-
-    story.append(_p("Pairs worth noticing", "h2"))
-    story.append(Paragraph(
-        f"Most alike: <b>{escape(alike[0])}</b> and <b>{escape(alike[1])}</b> "
-        f"({pairs.max():.2f}, {_correlation_verdict(pairs.max())}).",
-        STYLES["bullet"], bulletText="•"))
-    story.append(Paragraph(
-        f"Most different: <b>{escape(different[0])}</b> and <b>{escape(different[1])}</b> "
-        f"({pairs.min():.2f}, {_correlation_verdict(pairs.min())}).",
-        STYLES["bullet"], bulletText="•"))
-    story.append(Paragraph(
-        f"Average correlation between all pairs: {pairs.mean():.2f}.",
-        STYLES["bullet"], bulletText="•"))
-
-    story.append(_note_box("How to read this", [
-        "<b>Correlation</b> runs from -1 to +1. Green squares move apart (good for "
-        "diversification), red squares move together.",
-        "Below 0.3 is mostly independent, 0.3-0.6 somewhat linked, above 0.6 the stocks "
-        "move together. Negative values are rare and valuable.",
-        "Stocks in the same sector, like two banks, usually have high correlation.",
-    ]))
-    story.append(PageBreak())
-
-    # ===========================================================
-    # Page 4: The best mix
-    # ===========================================================
-    story.append(_p("3. The best mix", "h1"))
-    story.append(_p(
-        f"The best return for the risk is about {_pct(max_sharpe['return'])} a year at "
-        f"{_pct(max_sharpe['volatility'])} volatility, using {len(used)} of "
-        f"{len(names)} stocks.", "lead"))
-    story.append(_frontier_chart(frontier, stats, portfolios, target, target_return))
-
-    story.append(_p(f"Where the money goes (cap {max_weight:.0%} per stock)", "h2"))
-    weight_cols = dict(portfolios)
-    if target is not None:
-        weight_cols[f"Target {target_return:.0%}"] = target
-    header = ["Stock"] + list(weight_cols.keys())
-    rows = [header]
-    weights = pd.DataFrame({n: p["weights"] for n, p in weight_cols.items()})
-    weights = weights.loc[weights["Max Sharpe"].sort_values(ascending=False).index]
-    for name, r in weights.iterrows():
-        rows.append([name] + [_pct(v) if v >= 0.0005 else "-" for v in r])
-    other = (CONTENT_WIDTH - 45 * mm) / (len(header) - 1)
-    story.append(_table(rows, [45 * mm] + [other] * (len(header) - 1),
-                        number_cols=tuple(range(1, len(header)))))
-    if target_note:
-        story.append(Spacer(1, 4))
-        story.append(_p(escape(target_note), "small"))
-
-    story.append(_note_box("How to read this", [
-        "The <b>efficient frontier</b> is the best possible return for each level of "
-        "risk. Single stocks sit below it.",
-        "<b>Max Sharpe</b> has the best return per unit of risk. <b>Min Variance</b> has "
-        "the lowest risk and ignores return forecasts, which makes it more reliable.",
-        "These numbers use the same data the optimizer learned from, so they are a best "
-        "case. The backtest on the next page is the honest test.",
-    ]))
-    story.append(PageBreak())
-
-    # ===========================================================
-    # Page 5: Backtest
-    # ===========================================================
-    story.append(_p("4. Did it hold up?", "h1"))
-    if test is None:
-        story.append(_p(f"The backtest could not run: {escape(test_note)}", "lead"))
-    else:
-        res, growth = test["results"], test["growth"]
-        final = growth.iloc[-1]
-        beat = final["Max Sharpe"] > final["Equal Weight"]
+        # ===========================================================
+        # Page 1: Summary
+        # ===========================================================
+        story.append(_p("Portfolio report", "title"))
         story.append(_p(
-            f"Max Sharpe turned 100 kr into {final['Max Sharpe']:.0f} kr. Equal weight "
-            f"made {final['Equal Weight']:.0f} kr, so the optimizer "
-            f"{'won' if beat else 'lost'} over the {test['test_months']}-month test.",
-            "lead"))
-        story.append(_backtest_chart(growth))
+            f"Created {created}. {len(names)} stocks, monthly data from {period} "
+            f"({len(returns)} months).", "subtitle"))
 
-        story.append(_p("Predicted vs actual", "h2"))
-        rows = [["Portfolio", "Predicted return", "Actual return", "Gap",
-                 "Predicted volatility", "Actual volatility"]]
-        for name in portfolios:
-            pr = res.loc[name, "Predicted Return"]
-            ar = res.loc[name, "Actual Return"]
-            rows.append([name, _pct(pr), _pct(ar), f"{(ar - pr) * 100:+.1f} pts",
-                         _pct(res.loc[name, "Predicted Volatility"]),
-                         _pct(res.loc[name, "Actual Volatility"])])
-        story.append(_table(rows, [34 * mm, 27 * mm, 25 * mm, 22 * mm, 32 * mm,
-                                   CONTENT_WIDTH - 140 * mm], number_cols=(1, 2, 3, 4, 5)))
+        settings_rows = [
+            ["Setting", "Value"],
+            ["Stocks", Paragraph(_join(names), STYLES["cell"])],
+            ["Period", period],
+            ["Currency", "All values in SEK" + (
+                f", converted from {currency.describe(currency_info)}"
+                if currency_info is not None
+                and (currency_info["Currency"] != currency.BASE_CURRENCY).any() else "")],
+            ["Max weight per stock", f"{max_weight:.0%} (no short selling)"],
+            ["Benchmark", settings.benchmark_name(config["benchmark"]) + (
+                f" ({settings.BENCHMARKS[config['benchmark']]['description']})"
+                if config["benchmark"] in settings.BENCHMARKS else "")],
+            ["Risk-free rate", _pct(rf, 2)],
+            ["Target return", _pct(target_return)],
+        ]
+        if test is not None:
+            tr0, tr1 = test["train_period"]
+            te0, te1 = test["test_period"]
+            settings_rows.append(["Backtest",
+                                  f"Weights chosen on {tr0:%b %Y} to {tr1:%b %Y}, "
+                                  f"tested on {te0:%b %Y} to {te1:%b %Y}"])
+        story.append(_table(settings_rows, [45 * mm, CONTENT_WIDTH - 45 * mm]))
 
-        story.append(_p("Weights chosen from the training data", "h2"))
-        w = test["weights"]
-        w = w[(w > 0.0005).any(axis=1)]
-        rows = [["Stock"] + list(w.columns)]
-        for name, r in w.iterrows():
-            rows.append([name] + [_pct(v) if v >= 0.0005 else "-" for v in r])
-        other = (CONTENT_WIDTH - 45 * mm) / len(w.columns)
-        story.append(_table(rows, [45 * mm] + [other] * len(w.columns),
-                            number_cols=tuple(range(1, len(w.columns) + 1))))
+        # Key findings
+        best = stats["Annual Return"].idxmax()
+        calmest = stats["Annual Volatility"].idxmin()
+        avg_vol = stats["Annual Volatility"].mean()
+        used = max_sharpe["weights"][max_sharpe["weights"] > 0.005]
+        top = used.nlargest(min(3, len(used)))
+
+        findings = [
+            f"<b>{escape(best)}</b> had the highest return, about "
+            f"{_pct(stats.loc[best, 'Annual Return'])} a year. <b>{escape(calmest)}</b> was the "
+            f"calmest, with {_pct(stats.loc[calmest, 'Annual Volatility'])} volatility.",
+            f"Holding all {len(names)} stocks equally cut volatility from "
+            f"{_pct(avg_vol)} (average single stock) to {_pct(equal['volatility'])}. "
+            f"That is the diversification effect.",
+            f"The best risk-adjusted mix (Max Sharpe) expects {_pct(max_sharpe['return'])} a "
+            f"year at {_pct(max_sharpe['volatility'])} volatility. {_join(top.index)} make up "
+            f"{_pct(top.sum(), 0)} of it.",
+        ]
+        if test is not None:
+            res, final = test["results"], test["growth"].iloc[-1]
+            winner = final.idxmax()
+            findings.append(
+                f"In the backtest, 100 kr in Max Sharpe became {final['Max Sharpe']:.0f} kr, "
+                f"against {final['Equal Weight']:.0f} kr for equal weight. The best result "
+                f"came from {escape(winner)}. The optimizer predicted "
+                f"{_pct(res.loc['Max Sharpe', 'Predicted Return'])} a year and got "
+                f"{_pct(res.loc['Max Sharpe', 'Actual Return'])}.")
+
+        story.append(_p("Key findings", "h2"))
+        for f in findings:
+            story.append(Paragraph(f, STYLES["bullet"], bulletText="•"))
+
+        story.append(_p("Portfolios (measured on the full period)", "h2"))
+        rows = [["Portfolio", "Expected return", "Volatility", "Sharpe ratio"]]
+        for name, p in portfolios.items():
+            rows.append([name, _pct(p["return"]), _pct(p["volatility"]), f"{p['sharpe']:.2f}"])
+        if target is not None:
+            rows.append([f"Target {target_return:.0%}", _pct(target["return"]),
+                         _pct(target["volatility"]), f"{target['sharpe']:.2f}"])
+        story.append(_table(rows, [55 * mm, 40 * mm, 40 * mm, CONTENT_WIDTH - 135 * mm],
+                            number_cols=(1, 2, 3)))
+
+        if test is not None:
+            story.append(_p("Backtest (weights chosen without seeing the test period)", "h2"))
+            res = test["results"]
+            rows = [["Portfolio", "Predicted", "Actual", "Total return", "Worst drop",
+                     "Actual Sharpe"]]
+            for name in res.index:
+                rows.append([
+                    name,
+                    _pct(res.loc[name].get("Predicted Return")),
+                    _pct(res.loc[name, "Actual Return"]),
+                    _pct(res.loc[name, "Total Return"]),
+                    _pct(res.loc[name, "Max Drawdown"]),
+                    f"{res.loc[name, 'Actual Sharpe']:.2f}",
+                ])
+            story.append(_table(rows, [38 * mm, 24 * mm, 24 * mm, 28 * mm, 26 * mm,
+                                       CONTENT_WIDTH - 140 * mm], number_cols=(1, 2, 3, 4, 5)))
+            story.append(Spacer(1, 4))
+            story.append(_p("Predicted and actual are returns per year. Total return and "
+                            "worst drop cover the whole test period.", "small"))
+
+        story.append(PageBreak())
+
+        # ===========================================================
+        # Page 2: The stocks
+        # ===========================================================
+        story.append(_SectionStart(marks, "stocks"))
+        story.append(_p("1. The stocks", "h1"))
+        story.append(_p(
+            f"{escape(best)} grew the most, about {_pct(stats.loc[best, 'Annual Return'])} a "
+            f"year. Return per unit of risk (the Sharpe ratio) is the fairest way to "
+            f"compare them.", "lead"))
+
+        ranked = stats.assign(Sharpe=(stats["Annual Return"] - rf) / stats["Annual Volatility"])
+        ranked = ranked.sort_values("Sharpe", ascending=False)
+        rows = [["Stock", "Return per year", "Volatility per year", "Return per unit of risk",
+                 "Verdict"]]
+        for name, r in ranked.iterrows():
+            rows.append([name, _pct(r["Annual Return"]), _pct(r["Annual Volatility"]),
+                         f"{r['Sharpe']:.2f}", _sharpe_verdict(r["Sharpe"])])
+        story.append(_table(rows, [42 * mm, 30 * mm, 34 * mm, 40 * mm,
+                                   CONTENT_WIDTH - 146 * mm], number_cols=(1, 2, 3)))
+
+        story.append(_p("What 100 kr became", "h2"))
+        story.append(chart("growth", scales["stocks"],
+                           lambda s: _growth_chart(prices.loc[:, names], color_of, s)))
+        story.append(_p("Return vs risk (up and to the left is better)", "h2"))
+        story.append(chart("risk", scales["stocks"],
+                           lambda s: _risk_return_chart(stats, color_of, s)))
+        story.append(_note_box("How to read this", [
+            "<b>Return per year</b>: average monthly return x 12, dividends included. "
+            "5-10% is normal for stocks over the long run.",
+            "<b>Volatility</b>: how much the price swings. 18-25% is normal for a large "
+            "company; above 30% is wild.",
+            "<b>Return per unit of risk</b>: below 0.3 is poor, 0.3-0.7 OK, 0.7-1.0 good, "
+            "above 1.0 excellent.",
+        ]))
+        story.append(PageBreak())
+
+        # ===========================================================
+        # Page 3: Correlation
+        # ===========================================================
+        alike, different = pairs.idxmax(), pairs.idxmin()
+        story.append(_SectionStart(marks, "corr"))
+        story.append(_p("2. How they move together", "h1"))
+        story.append(_p(
+            f"Holding all {len(names)} stocks equally gives {_pct(equal['volatility'])} "
+            f"volatility, against {_pct(avg_vol)} for the average single stock.", "lead"))
+        story.append(chart("heatmap", scales["corr"], lambda s: _heatmap_chart(corr, s)))
+
+        story.append(_p("Risk alone vs together", "h2"))
+        rows = [["", "Volatility per year"],
+                ["Average single stock", _pct(avg_vol)],
+                ["Equal weight portfolio", _pct(equal["volatility"])],
+                ["Min variance portfolio", _pct(min_var["volatility"])]]
+        story.append(_table(rows, [70 * mm, 45 * mm], number_cols=(1,)))
+
+        story.append(_p("Pairs worth noticing", "h2"))
+        story.append(Paragraph(
+            f"Most alike: <b>{escape(alike[0])}</b> and <b>{escape(alike[1])}</b> "
+            f"({pairs.max():.2f}, {_correlation_verdict(pairs.max())}).",
+            STYLES["bullet"], bulletText="•"))
+        story.append(Paragraph(
+            f"Most different: <b>{escape(different[0])}</b> and <b>{escape(different[1])}</b> "
+            f"({pairs.min():.2f}, {_correlation_verdict(pairs.min())}).",
+            STYLES["bullet"], bulletText="•"))
+        story.append(Paragraph(
+            f"Average correlation between all pairs: {pairs.mean():.2f}.",
+            STYLES["bullet"], bulletText="•"))
 
         story.append(_note_box("How to read this", [
-            "The weights were chosen using only data before the test started, then kept "
-            "fixed. This is the honest way to judge a strategy.",
-            "A large <b>gap</b> between predicted and actual return means past returns "
-            "were a poor guide to the future.",
-            "<b>Worst drop</b>: 0 to -10% is mild, -10 to -20% a correction, below -20% a "
-            "bear market.",
-            "OMXS30 excludes dividends; add roughly 3-4% a year to compare fairly. A short "
-            "test period is one data point, not proof.",
+            "<b>Correlation</b> runs from -1 to +1. Green squares move apart (good for "
+            "diversification), red squares move together.",
+            "Below 0.3 is mostly independent, 0.3-0.6 somewhat linked, above 0.6 the stocks "
+            "move together. Negative values are rare and valuable.",
+            "Stocks in the same sector, like two banks, usually have high correlation.",
         ]))
+        story.append(PageBreak())
+
+        # ===========================================================
+        # Page 4: The best mix
+        # ===========================================================
+        story.append(_SectionStart(marks, "mix"))
+        story.append(_p("3. The best mix", "h1"))
+        story.append(_p(
+            f"The best return for the risk is about {_pct(max_sharpe['return'])} a year at "
+            f"{_pct(max_sharpe['volatility'])} volatility, using {len(used)} of "
+            f"{len(names)} stocks.", "lead"))
+        story.append(chart("frontier", scales["mix"], lambda s: _frontier_chart(
+            frontier, stats, portfolios, target, target_return, s)))
+
+        story.append(_p(f"Where the money goes (cap {max_weight:.0%} per stock)", "h2"))
+        weight_cols = dict(portfolios)
+        if target is not None:
+            weight_cols[f"Target {target_return:.0%}"] = target
+        header = ["Stock"] + list(weight_cols.keys())
+        rows = [header]
+        weights = pd.DataFrame({n: p["weights"] for n, p in weight_cols.items()})
+        weights = weights.loc[weights["Max Sharpe"].sort_values(ascending=False).index]
+        for name, r in weights.iterrows():
+            rows.append([name] + [_pct(v) if v >= 0.0005 else "-" for v in r])
+        other = (CONTENT_WIDTH - 45 * mm) / (len(header) - 1)
+        story.append(_table(rows, [45 * mm] + [other] * (len(header) - 1),
+                            number_cols=tuple(range(1, len(header)))))
+        if target_note:
+            story.append(Spacer(1, 4))
+            story.append(_p(escape(target_note), "small"))
+
+        story.append(_note_box("How to read this", [
+            "The <b>efficient frontier</b> is the best possible return for each level of "
+            "risk. Single stocks sit below it.",
+            "<b>Max Sharpe</b> has the best return per unit of risk. <b>Min Variance</b> has "
+            "the lowest risk and ignores return forecasts, which makes it more reliable.",
+            "These numbers use the same data the optimizer learned from, so they are a best "
+            "case. The backtest on the next page is the honest test.",
+        ]))
+        story.append(PageBreak())
+
+        # ===========================================================
+        # Page 5: Backtest
+        # ===========================================================
+        story.append(_SectionStart(marks, "backtest"))
+        story.append(_p("4. Did it hold up?", "h1"))
+        if test is None:
+            story.append(_p(f"The backtest could not run: {escape(test_note)}", "lead"))
+        else:
+            res, growth = test["results"], test["growth"]
+            final = growth.iloc[-1]
+            beat = final["Max Sharpe"] > final["Equal Weight"]
+            story.append(_p(
+                f"Max Sharpe turned 100 kr into {final['Max Sharpe']:.0f} kr. Equal weight "
+                f"made {final['Equal Weight']:.0f} kr, so the optimizer "
+                f"{'won' if beat else 'lost'} over the {test['test_months']}-month test.",
+                "lead"))
+            story.append(chart("backtest", scales["backtest"],
+                               lambda s: _backtest_chart(growth, s)))
+
+            story.append(_p("Predicted vs actual", "h2"))
+            rows = [["Portfolio", "Predicted return", "Actual return", "Gap",
+                     "Predicted volatility", "Actual volatility"]]
+            for name in portfolios:
+                pr = res.loc[name, "Predicted Return"]
+                ar = res.loc[name, "Actual Return"]
+                rows.append([name, _pct(pr), _pct(ar), f"{(ar - pr) * 100:+.1f} pts",
+                             _pct(res.loc[name, "Predicted Volatility"]),
+                             _pct(res.loc[name, "Actual Volatility"])])
+            story.append(_table(rows, [34 * mm, 27 * mm, 25 * mm, 22 * mm, 32 * mm,
+                                       CONTENT_WIDTH - 140 * mm], number_cols=(1, 2, 3, 4, 5)))
+
+            story.append(_p("Weights chosen from the training data", "h2"))
+            w = test["weights"]
+            w = w[(w > 0.0005).any(axis=1)]
+            rows = [["Stock"] + list(w.columns)]
+            for name, r in w.iterrows():
+                rows.append([name] + [_pct(v) if v >= 0.0005 else "-" for v in r])
+            other = (CONTENT_WIDTH - 45 * mm) / len(w.columns)
+            story.append(_table(rows, [45 * mm] + [other] * len(w.columns),
+                                number_cols=tuple(range(1, len(w.columns) + 1))))
+
+            story.append(_note_box("How to read this", [
+                "The weights were chosen using only data before the test started, then kept "
+                "fixed. This is the honest way to judge a strategy.",
+                "A large <b>gap</b> between predicted and actual return means past returns "
+                "were a poor guide to the future.",
+                "<b>Worst drop</b>: 0 to -10% is mild, -10 to -20% a correction, below -20% a "
+                "bear market.",
+                escape(settings.benchmark_note(config["benchmark"])),
+                "A short test period is one data point, not proof.",
+            ]))
+
+        return story
 
     # --- Build the PDF ---
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buffer, pagesize=A4, leftMargin=MARGIN, rightMargin=MARGIN,
-        topMargin=MARGIN, bottomMargin=22 * mm,
-        title="Portfolio report", author="Python Stock Analyst",
-    )
-    footer = _footer(created)
-    doc.build(story, onFirstPage=footer, onLaterPages=footer)
-    return buffer.getvalue()
+    def render(scales):
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(
+            buffer, pagesize=A4, leftMargin=MARGIN, rightMargin=MARGIN,
+            topMargin=MARGIN, bottomMargin=22 * mm,
+            title="Portfolio report", author="Python Stock Analyst",
+        )
+        pages_seen, marks = [], {}
+        footer = _footer(created, pages_seen)
+        doc.build(make_story(scales, marks), onFirstPage=footer, onLaterPages=footer)
+        return buffer.getvalue(), marks, max(pages_seen)
+
+    def too_long(marks, last_page):
+        """Sections that spill onto more than one page."""
+        order = ["stocks", "corr", "mix", "backtest"]
+        starts = [marks.get(name, 0) for name in order] + [last_page + 1]
+        return [name for i, name in enumerate(order) if starts[i + 1] - starts[i] > 1]
+
+    # Each section should fit on its own page. With many stocks the tables get
+    # longer, so shrink the charts of a section that spills over, step by step.
+    scales = {"stocks": 1.0, "corr": 1.0, "mix": 1.0, "backtest": 1.0}
+    pdf, marks, last_page = render(scales)
+    for _ in range(5):
+        shrink = [s for s in too_long(marks, last_page) if scales[s] > 0.55]
+        if not shrink:
+            break
+        for section in shrink:
+            scales[section] = round(scales[section] - 0.1, 2)
+        pdf, marks, last_page = render(scales)
+    return pdf
 
 
 def save_report(pdf_bytes, folder=None):

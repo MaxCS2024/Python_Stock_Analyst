@@ -3,16 +3,17 @@ import warnings
 import yfinance as yf
 import pandas as pd
 
-from src import calculations
-from src import portfolio
-from src import backtest
-from src import settings
-from src import visualizations
-from src import report
-from src import currency
-
 # Hide harmless pandas deprecation warnings coming from inside yfinance
 warnings.filterwarnings("ignore", message=".*inplace keyword.*")
+
+from src import calculations
+from src import currency
+from src import portfolio
+from src import backtest
+from src import report
+from src import settings
+from src import visualizations
+
 
 # Settings come from settings.json (edit them with the dashboard's
 # "Save as default" button, or by editing the file directly)
@@ -30,11 +31,14 @@ MAX_WEIGHT = config["max_weight"]
 TRAIN_END = config["train_end"]
 BENCHMARK = config["benchmark"]
 
+settings.lookup_names(tickers)   # readable names from Yahoo (cached after the first run)
+
 print(f"Using {len(tickers)} stocks: "
       + ", ".join(settings.display_name(t) for t in tickers))
 
 
 # Step 1: Download stock data
+
 data = yf.download(
     tickers,
     start=START_DATE,
@@ -53,7 +57,9 @@ prices = data["Close"].dropna(axis=1, how="all").sort_index()
 if prices.empty:
     raise ValueError("No valid stock prices were downloaded.")
 
+
 # Step 1b: Convert all prices to Swedish kronor
+
 prices, currency_info = currency.convert_to_sek(prices, START_DATE, END_DATE)
 
 print("\nCURRENCIES (all prices converted to SEK)")
@@ -159,7 +165,7 @@ try:
         )
         if not bench_sek.empty:
             benchmark_returns = bench_sek.iloc[:, 0].pct_change().dropna()
-            benchmark_returns.name = "OMXS30"
+            benchmark_returns.name = settings.benchmark_name(BENCHMARK)
 except Exception as error:
     print(f"\nCould not download benchmark {BENCHMARK}: {error}")
 
@@ -175,12 +181,14 @@ backtest.print_backtest(test)
 
 
 # Step 6: PDF report (saved in the reports/ folder)
+
 pdf = report.build_report(prices, config, benchmark_returns, currency_info)
 report_path = report.save_report(pdf)
 print(f"\nPDF report saved: {report_path}")
 
 
 # Step 7: Generate visualizations
+
 visualizations.correlation_heatmap(
     analysis["correlation"]
 )

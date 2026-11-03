@@ -11,7 +11,7 @@ Both read the same settings, so they always show the same results.
 
 ## What it does
 
-1. **Downloads monthly prices** for your chosen stocks, including dividends.
+1. **Downloads monthly prices** for your chosen stocks, including dividends, and converts them all to Swedish kronor so foreign stocks include the currency effect.
 2. **Calculates the ingredients:** expected return, volatility, covariance and correlation for each stock.
 3. **Optimizes the portfolio** using Markowitz mean-variance optimization:
    - **Max Sharpe:** the best return per unit of risk
@@ -19,7 +19,7 @@ Both read the same settings, so they always show the same results.
    - **Target return:** the lowest-risk way to reach a return you choose
    - **Equal Weight:** the same amount in every stock, as a simple benchmark
 4. **Draws the efficient frontier:** the best possible return at each level of risk.
-5. **Backtests out of sample:** picks the weights using only older data, then measures what happened afterwards and compares it with the OMXS30 index.
+5. **Backtests out of sample:** picks the weights using only older data, then measures what happened afterwards and compares it with a benchmark index of your choice.
 
 Short selling isn't allowed, and you can cap how much any single stock can make up of the portfolio (25% by default).
 
@@ -35,12 +35,14 @@ Python_Stock_Analyst/
 │   └── config.toml         # Dashboard colors, fonts and network setting
 ├── src/
 │   ├── settings.py         # Loads and saves settings.json
+│   ├── currency.py         # Converts all prices to SEK
 │   ├── calculations.py     # Returns, volatility, covariance, correlation
 │   ├── portfolio.py        # Markowitz optimization
 │   ├── backtest.py         # Out-of-sample backtest
 │   └── visualizations.py   # Charts for main.py
 ├── tests/
-│   └── test_portfolio.py   # Checks the math against a hand-calculated example
+│   ├── test_portfolio.py   # Checks the math against a hand-calculated example
+│   └── test_currency.py    # Checks the currency conversion
 └── visualizations/         # Chart images saved by main.py
 ```
 
@@ -70,6 +72,12 @@ Then install the packages:
 
 ```bash
 pip install -r requirements.txt
+```
+
+If PowerShell blocks the activation script, run this first:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
 ```
 
 ## Usage
@@ -132,7 +140,7 @@ Settings are stored in `settings.json`. The easiest way to change them is the da
 | `risk_free_rate` | Return with no risk, used for the Sharpe ratio |
 | `target_return` | Return for the "lowest risk for this return" portfolio |
 | `train_end` | Backtest: weights are chosen using data up to this date |
-| `benchmark` | Index to compare against (`^OMX` is OMXS30) |
+| `benchmark` | Index to compare against: `^OMX` (OMXS30), `URTH` (MSCI World), `ACWI` (MSCI All Country World) or `SPY` (S&P 500) |
 
 If `settings.json` doesn't exist, the defaults in `src/settings.py` are used.
 
@@ -148,7 +156,7 @@ If `settings.json` doesn't exist, the defaults in `src/settings.py` are used.
 
 - **Past returns are a poor forecast.** The optimizer trusts historical average returns completely, so the backtest's predicted vs actual comparison is the most important result.
 - **Min Variance is often the most reliable portfolio**, because it only uses volatility and correlation, which are estimated more accurately than returns.
-- **The OMXS30 benchmark excludes dividends**, while the stock prices include them. Add roughly 3–4% a year to the index for a fair comparison.
+- **Pick a benchmark that matches your stocks:** OMXS30 for Swedish stocks, a world index for a global mix. OMXS30 excludes dividends, so add roughly 3–4% a year to it for a fair comparison; the world indexes include them.
 - **A short backtest is one data point, not proof.** Try different `train_end` dates to see whether the conclusion holds.
 - **Choosing stocks you already know did well** gives a hindsight advantage the index doesn't have.
 

@@ -8,10 +8,10 @@ It uses the same calculations as main.py, but lets you change the
 settings with sliders and explains each result in plain language.
 """
 
-import os
-import math
-import sys
 import json
+import math
+import os
+import sys
 import warnings
 
 import numpy as np
@@ -22,10 +22,11 @@ import yfinance as yf
 
 from src import backtest
 from src import calculations
-from src import portfolio
-from src import settings
-from src import report
 from src import currency
+from src import portfolio
+from src import report
+from src import settings
+
 
 # If started with plain "python dashboard.py" (or VS Code's Run button),
 # restart it properly with "streamlit run dashboard.py".
@@ -37,6 +38,10 @@ if __name__ == "__main__":
 
         sys.argv = ["streamlit", "run", __file__]
         sys.exit(stcli.main())
+
+# Hide harmless pandas deprecation warnings coming from inside yfinance
+warnings.filterwarnings("ignore", message=".*inplace keyword.*")
+
 
 # ---------------------------------------------------------------
 # Look and feel
@@ -56,7 +61,6 @@ PORTFOLIO_COLORS = {
     "Max Sharpe": "#1F6FEB",     # bright blue
     "Min Variance": "#0F9D58",   # emerald
     "Equal Weight": "#EA580C",   # orange
-    "OMXS30": "#64748B",         # slate
 }
 TARGET_COLOR = "#E8204F"         # rose
 PREDICTED_COLOR = "#A9B6BD"      # light grey bars for "predicted"
@@ -75,23 +79,23 @@ STOCK_COLORS = [
 ]
 
 st.markdown(
-    """
+    f"""
     <style>
-    .headline {
+    .headline {{
         font-family: "Source Serif 4", Georgia, serif;
         font-size: 1.65rem;
         line-height: 1.3;
         font-weight: 500;
-        color: #1E3442;
+        color: {INK};
         max-width: 48rem;
         margin: 0.4rem 0 0.3rem 0;
-    }
-    .subline {
-        color: #5E6B73;
+    }}
+    .subline {{
+        color: {MUTED};
         font-size: 1.02rem;
         max-width: 48rem;
         margin-bottom: 1.2rem;
-    }
+    }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -170,10 +174,15 @@ def download_benchmark(benchmark, start, end):
         if close_sek.empty:
             return None
         returns = close_sek.iloc[:, 0].pct_change().dropna()
-        returns.name = "OMXS30"
+        returns.name = settings.benchmark_name(benchmark)
         return returns
     except Exception:
         return None
+
+
+@st.cache_data(show_spinner="Looking up company names...")
+def load_names(tickers):
+    return settings.lookup_names(tickers)
 
 
 @st.cache_data(ttl=3600, show_spinner="Converting prices to Swedish kronor...")
@@ -206,6 +215,7 @@ with st.sidebar:
     )
     extra_tickers = [t.strip().upper() for t in extra.split(",") if t.strip()]
     tickers = tuple(dict.fromkeys(chosen + extra_tickers))
+    load_names(tickers)   # readable names from Yahoo for unknown tickers
 
     start_date = st.date_input("Start date", value=pd.Timestamp(config["start_date"]))
     end_date = pd.Timestamp(settings.end_date())
@@ -230,8 +240,22 @@ with st.sidebar:
         min(40.0, max(0.0, round(config["target_return"] * 100, 1))), 0.5,
         help="Used for the lowest-risk portfolio that reaches this return.",
     ) / 100
-    
-    
+
+    st.subheader("Compare with")
+    benchmark_options = list(dict.fromkeys(list(settings.BENCHMARKS) + [config["benchmark"]]))
+    benchmark = st.selectbox(
+        "Benchmark index",
+        options=benchmark_options,
+        index=benchmark_options.index(config["benchmark"]),
+        format_func=settings.benchmark_name,
+        help="The index the backtest compares your portfolios with. "
+             "Pick one that matches your stocks: OMXS30 for Swedish stocks, "
+             "a world index for a global mix.",
+    )
+    if benchmark in settings.BENCHMARKS:
+        st.caption(settings.BENCHMARKS[benchmark]["description"].capitalize() + ".")
+
+
 # ---------------------------------------------------------------
 # Load and calculate
 # ---------------------------------------------------------------
@@ -534,7 +558,7 @@ with tab3:
             fig.add_trace(go.Scatter(
                 x=[p["volatility"] * 100], y=[p["return"] * 100], mode="markers", name=name,
                 marker=dict(size=18 if name == "Max Sharpe" else 13, symbol=markers[name],
-                            color=PORTFOLIO_COLORS[name], line=dict(color="white", width=1.5)),
+                            color=PORTFOLIO_COLORS[name], line=dict(color=BACKGROUND, width=1.5)),
                 hovertemplate=name + "<br>Return %{y:.1f}%<br>Volatility %{x:.1f}%<extra></extra>",
             ))
         if target is not None:
@@ -542,7 +566,7 @@ with tab3:
                 x=[target["volatility"] * 100], y=[target["return"] * 100], mode="markers",
                 name=f"Target {target_return:.0%}",
                 marker=dict(size=13, symbol="triangle-up", color=TARGET_COLOR,
-                            line=dict(color="white", width=1.5)),
+                            line=dict(color=BACKGROUND, width=1.5)),
             ))
         fig.update_xaxes(title="Volatility per year (%)")
         fig.update_yaxes(title="Return per year (%)")
@@ -620,7 +644,7 @@ with tab4:
         )
 
         train_end_to_save = (train_end + pd.offsets.MonthEnd(0)).strftime("%Y-%m-%d")
-        bench = download_benchmark(config["benchmark"], str(start_date), str(end_date.date()))
+        bench = download_benchmark(benchmark, str(start_date), str(end_date.date()))
         test = backtest.run_backtest(
             returns, train_end=train_end, risk_free_rate=risk_free,
             max_weight=max_weight, benchmark_returns=bench,
@@ -651,7 +675,81 @@ with tab4:
                         delta=f"{final[name] - 100:+.1f}%",
                         help="Value of 100 kr at the end of the test period.",
                     )
-                    
+                    st.caption(f"Worst drop: {pct(res.loc[name, 'Max Drawdown'])}")
+
+        left, right = st.columns([3, 2])
+
+        with left:
+            st.subheader("100 kr invested at the start of the test")
+            fig = go.Figure()
+            for name in growth.columns:
+                fig.add_trace(go.Scatter(
+                    x=growth.index, y=growth[name], name=name, mode="lines",
+                    line=dict(color=PORTFOLIO_COLORS.get(name, GRANITE), width=2.5,
+                              dash="solid" if name in portfolios else "dash"),
+                    hovertemplate="%{y:.0f} kr<extra>" + name + "</extra>",
+                ))
+            fig.add_hline(y=100, line_color=GRANITE, line_width=1, opacity=0.5)
+            fig.update_yaxes(title="Value (kr)")
+            st.plotly_chart(style_figure(fig), key="bt_growth")
+
+        with right:
+            st.subheader("Predicted vs actual return")
+            names_bt = list(portfolios.keys())
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=names_bt, y=res.loc[names_bt, "Predicted Return"].astype(float) * 100,
+                name="Predicted (training)", marker_color=PREDICTED_COLOR,
+                hovertemplate="%{x}: %{y:.1f}%<extra>Predicted</extra>",
+            ))
+            fig.add_trace(go.Bar(
+                x=names_bt, y=res.loc[names_bt, "Actual Return"].astype(float) * 100,
+                name="Actual (test)",
+                marker_color=[PORTFOLIO_COLORS[n] for n in names_bt],
+                hovertemplate="%{x}: %{y:.1f}%<extra>Actual</extra>",
+            ))
+            fig.update_layout(barmode="group")
+            fig.update_yaxes(title="Return per year (%)")
+            st.plotly_chart(style_figure(fig), key="bt_pred")
+
+        with st.expander("Full results table"):
+            show = res.copy()
+            for c in show.columns:
+                show[c] = pd.to_numeric(show[c], errors="coerce")
+            pct_cols = [c for c in show.columns if "Sharpe" not in c]
+            show[pct_cols] = show[pct_cols] * 100
+            st.dataframe(
+                show,
+                column_config={
+                    c: st.column_config.NumberColumn(format="%.2f" if "Sharpe" in c else "%.1f%%")
+                    for c in show.columns
+                },
+            )
+
+        with st.expander("Weights chosen from the training data"):
+            w = test["weights"]
+            w = w[(w > 0.001).any(axis=1)] * 100
+            st.dataframe(
+                w,
+                column_config={c: st.column_config.NumberColumn(format="%.1f%%") for c in w.columns},
+            )
+
+        with st.expander("How to read this"):
+            st.markdown(
+                "- The weights were picked using **only** the data before the test started, "
+                "then kept fixed. This is the honest way to judge a strategy, because in real "
+                "life you never know the future.\n"
+                "- **Predicted vs actual** shows how good the optimizer's forecast was. "
+                "A big gap means the past was a poor guide.\n"
+                "- **Worst drop** (max drawdown) is the biggest fall from a peak. It's often "
+                "what investors feel most.\n"
+                f"- **{settings.benchmark_name(benchmark)}**: "
+                f"{settings.benchmark_note(benchmark)}\n"
+                "- A short test period is one data point, not proof. Move the slider above "
+                "to see whether the result holds for other split dates."
+            )
+
+
 # ---------------------------------------------------------------
 # Save button (at the end, so it can include the backtest date)
 # ---------------------------------------------------------------
@@ -663,7 +761,7 @@ current = {
     "risk_free_rate": round(risk_free, 4),
     "target_return": round(target_return, 4),
     "train_end": train_end_to_save,
-    "benchmark": config["benchmark"],
+    "benchmark": benchmark,
 }
 
 saved_now = {k: config[k] for k in current}
@@ -682,8 +780,8 @@ with st.sidebar:
         settings.save(current)
         st.session_state["just_saved"] = True
         st.rerun()   # reload so everything uses the newly saved settings
-        
-        
+
+
 # ---------------------------------------------------------------
 # PDF report (in the sidebar, under Save as default)
 # ---------------------------------------------------------------
