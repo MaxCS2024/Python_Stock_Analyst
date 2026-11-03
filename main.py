@@ -9,6 +9,7 @@ from src import backtest
 from src import settings
 from src import visualizations
 from src import report
+from src import currency
 
 # Hide harmless pandas deprecation warnings coming from inside yfinance
 warnings.filterwarnings("ignore", message=".*inplace keyword.*")
@@ -51,6 +52,17 @@ prices = data["Close"].dropna(axis=1, how="all").sort_index()
 
 if prices.empty:
     raise ValueError("No valid stock prices were downloaded.")
+
+# Step 1b: Convert all prices to Swedish kronor
+prices, currency_info = currency.convert_to_sek(prices, START_DATE, END_DATE)
+
+print("\nCURRENCIES (all prices converted to SEK)")
+for ticker, row in currency_info.iterrows():
+    status = "" if row["Converted"] else "  <- no exchange rate, left out"
+    print(f"  {settings.display_name(ticker):<14} {row['Currency']}{status}")
+
+if prices.shape[1] < 2:
+    raise ValueError("Fewer than two stocks could be converted to SEK.")
 
 
 # Step 2: Run financial calculations
@@ -142,8 +154,12 @@ try:
     bench_close = bench_close.dropna().sort_index()
 
     if not bench_close.empty:
-        benchmark_returns = bench_close.pct_change().dropna()
-        benchmark_returns.name = "OMXS30"
+        bench_sek, _ = currency.convert_to_sek(
+            bench_close.to_frame(BENCHMARK), START_DATE, END_DATE
+        )
+        if not bench_sek.empty:
+            benchmark_returns = bench_sek.iloc[:, 0].pct_change().dropna()
+            benchmark_returns.name = "OMXS30"
 except Exception as error:
     print(f"\nCould not download benchmark {BENCHMARK}: {error}")
 
@@ -159,7 +175,7 @@ backtest.print_backtest(test)
 
 
 # Step 6: PDF report (saved in the reports/ folder)
-pdf = report.build_report(prices, config, benchmark_returns)
+pdf = report.build_report(prices, config, benchmark_returns, currency_info)
 report_path = report.save_report(pdf)
 print(f"\nPDF report saved: {report_path}")
 

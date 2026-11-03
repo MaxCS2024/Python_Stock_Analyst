@@ -25,6 +25,7 @@ from src import calculations
 from src import portfolio
 from src import settings
 from src import report
+from src import currency
 
 # If started with plain "python dashboard.py" (or VS Code's Run button),
 # restart it properly with "streamlit run dashboard.py".
@@ -165,11 +166,19 @@ def download_benchmark(benchmark, start, end):
         close = close.dropna().sort_index()
         if close.empty:
             return None
-        returns = close.pct_change().dropna()
+        close_sek, _ = currency.convert_to_sek(close.to_frame(benchmark), start, end)
+        if close_sek.empty:
+            return None
+        returns = close_sek.iloc[:, 0].pct_change().dropna()
         returns.name = "OMXS30"
         return returns
     except Exception:
         return None
+
+
+@st.cache_data(ttl=3600, show_spinner="Converting prices to Swedish kronor...")
+def convert_prices(prices, start, end):
+    return currency.convert_to_sek(prices, start, end)
 
 
 # ---------------------------------------------------------------
@@ -246,7 +255,20 @@ missing = [t for t in tickers if t not in prices.columns]
 if missing:
     st.warning(f"No data for {', '.join(missing)}. They were left out.")
 
+# Convert every price to Swedish kronor (prices_local keeps the originals)
+prices_local = prices
+prices, currency_info = convert_prices(prices_local, str(start_date), str(end_date.date()))
+
+not_converted = list(currency_info.index[~currency_info["Converted"]])
+if not_converted:
+    st.warning(
+        f"Couldn't download exchange rates for {', '.join(not_converted)}, "
+        "so they were left out."
+    )
+
 prices = prices.rename(columns=display_name)
+prices_local = prices_local.drop(columns=not_converted).rename(columns=display_name)
+currency_of = {display_name(t): cur for t, cur in currency_info["Currency"].items()}
 
 if prices.shape[1] < 2:
     st.error("At least two stocks need price data. Pick other stocks in the sidebar.")
@@ -288,10 +310,13 @@ except ValueError as error:
 
 portfolios = {"Max Sharpe": max_sharpe, "Min Variance": min_var, "Equal Weight": equal}
 
+foreign = sorted({c for c in currency_of.values() if c != currency.BASE_CURRENCY})
 st.caption(
     f"{len(names)} stocks, monthly data from {returns.index[0]:%B %Y} "
     f"to {returns.index[-1]:%B %Y} ({len(returns)} months). "
-    f"No stock above {max_weight:.0%}, no short selling."
+    f"No stock above {max_weight:.0%}, no short selling. "
+    + (f"All values in SEK, converted from {', '.join(foreign)}."
+       if foreign else "All values in SEK.")
 )
 
 tab1, tab2, tab3, tab4 = st.tabs([
@@ -351,8 +376,13 @@ with tab1:
         fig.update_yaxes(title="Return per year (%)")
         st.plotly_chart(style_figure(fig), key="risk_return")
 
+    # Return in the stock's own currency, to show what the currency added or removed
+    local_returns = calculations.calculate_returns(prices_local[names]).mean() * 12
+
     table = pd.DataFrame({
+        "Currency": pd.Series(currency_of).reindex(names),
         "Return per year": stats["Annual Return"] * 100,
+        "Currency effect": (stats["Annual Return"] - local_returns) * 100,
         "Volatility per year": stats["Annual Volatility"] * 100,
         "Return per unit of risk": (stats["Annual Return"] - risk_free) / stats["Annual Volatility"],
     }).sort_values("Return per unit of risk", ascending=False)
@@ -360,7 +390,12 @@ with tab1:
     st.dataframe(
         table,
         column_config={
-            "Return per year": st.column_config.NumberColumn(format="%.1f%%"),
+            "Return per year": st.column_config.NumberColumn(
+                format="%.1f%%", help="In SEK, which is what a Swedish investor got."),
+            "Currency effect": st.column_config.NumberColumn(
+                format="%.1f%%",
+                help="Return in SEK minus return in the stock's own currency. "
+                     "Negative means the currency weakened against the krona."),
             "Volatility per year": st.column_config.NumberColumn(format="%.1f%%"),
             "Return per unit of risk": st.column_config.NumberColumn(
                 format="%.2f", help="Sharpe ratio: (return − risk-free rate) ÷ volatility"),
@@ -369,7 +404,10 @@ with tab1:
 
     with st.expander("How to read this"):
         st.markdown(
-            "- **Return per year** is the average monthly return × 12.\n"
+            "- **Return per year** is the average monthly return × 12, in Swedish kronor.\n"
+            "- **Currency effect** shows how much exchange rates changed the return. "
+            "A foreign stock can rise in its own currency and still lose money in SEK "
+            "if that currency falls against the krona.\n"
             "- **Volatility** is how much the price swings, the standard deviation of "
             "monthly returns × √12. Around 20% is normal for a large Swedish company.\n"
             "- In the scatter chart, **up and to the left is better**: more return for less risk.\n"
@@ -661,7 +699,7 @@ with st.sidebar:
              "it in the reports folder.",
     ):
         with st.spinner("Building the report..."):
-            pdf = report.build_report(prices, current, bench)
+            pdf = report.build_report(prices, current, bench, currency_info)
             path = report.save_report(pdf)
         st.session_state["report"] = {"signature": signature, "pdf": pdf, "path": path}
 
