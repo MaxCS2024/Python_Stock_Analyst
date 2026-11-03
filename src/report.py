@@ -32,7 +32,7 @@ from reportlab.platypus import (
     Spacer, Table, TableStyle,
 )
 
-from src import backtest, calculations, portfolio, settings
+from src import backtest, calculations, currency, portfolio, settings
 
 
 # ---------------------------------------------------------------
@@ -305,13 +305,14 @@ def _footer(created):
 # The report
 # ---------------------------------------------------------------
 
-def build_report(prices, config, benchmark_returns=None):
+def build_report(prices, config, benchmark_returns=None, currency_info=None):
     """
     Build the PDF report and return it as bytes.
 
-    prices:            monthly prices, one column per stock (tickers or names)
+    prices:            monthly prices in SEK, one column per stock (tickers or names)
     config:            settings dict (see src/settings.py)
     benchmark_returns: optional monthly index returns (e.g. OMXS30)
+    currency_info:     optional table from currency.convert_to_sek()
     """
     created = date.today().isoformat()
 
@@ -373,6 +374,9 @@ def build_report(prices, config, benchmark_returns=None):
         ["Setting", "Value"],
         ["Stocks", Paragraph(_join(names), STYLES["cell"])],
         ["Period", period],
+        ["Currency", "All values in SEK" + (
+            f", converted from {currency.describe(currency_info)}"
+            if currency_info is not None else "")],
         ["Max weight per stock", f"{max_weight:.0%} (no short selling)"],
         ["Risk-free rate", _pct(rf, 2)],
         ["Target return", _pct(target_return)],
